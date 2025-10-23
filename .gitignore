@@ -1,0 +1,36 @@
+# Ignore environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Python cache / build files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor settings
+.vscode/
+.idea/
+
+# Node (if you have a frontend)
+node_modules/
+dist/
+build/
