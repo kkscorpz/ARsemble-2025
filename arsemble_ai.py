@@ -327,267 +327,326 @@ def build_chips(items: List[dict], ctype: str, limit: int = 6) -> List[dict]:
 
 def get_compatible_components(query: str, data: dict) -> dict:
     """
-    Robust compatibility resolver that returns a dict with keys:
-      - found (bool)
-      - target (str)
-      - compatible_type (str)
-      - reason (optional)
-      - chips (list)
-      - message (optional)
+    Improved compatibility resolver with clearer messaging when dataset entries are missing.
 
-    Features:
-      - DDRx-aware motherboard filtering (e.g. "Which motherboards support DDR4?")
-      - GPU <- motherboard rule (asked_type == "gpu" and target_type == "motherboard")
-      - Socket-aware CPU queries (detects AM4, AM5, LGA1700, etc.)
-      - Defensive: always returns a dict, logs exceptions
-      - Debug print to show which dataset entry matched (for CLI)
+    - Parses queries like "Is A compatible with B?" or "A compatible with B"
+    - Tries direct slug/chip-id lookup first, then fuzzy matching
+    - If both resolved:
+        - If CPU + Motherboard -> check sockets (or infer socket from chipset tokens)
+        - Otherwise attempt a generic compatible(...) check or return a clear message
+    - If one side missing -> give helpful message with example "details <NAME>" to help the user
+    - If neither found -> explicitly tell the user the dataset doesn't contain those items and show examples
+    - Always returns a dict
     """
     result = {"found": False}
     try:
-        q = (query or "").lower()
-        q_norm = _normalize_text_for_match(query)
+        if not query or not isinstance(query, str):
+            return {"found": False, "message": "No query provided for compatibility check. Example: details <name>"}
+
+        q_raw = query.strip()
+        q = q_raw.lower()
+
+        # Quick split on common phrasing
+        parts = re.split(
+            r"\bcompatible with\b|\bworks with\b|\bis compatible with\b|\bcan i use\b", q, flags=re.IGNORECASE)
+        parts = [p.strip() for p in parts if p.strip()]
+
+        # if that didn't yield two sides try simpler separators
+        if len(parts) < 2:
+            if " with " in q:
+                parts = [p.strip() for p in q.split(" with ", 1)]
+            elif " and " in q:
+                parts = [p.strip() for p in re.split(
+                    r"\band\b", q, flags=re.IGNORECASE)[:2]]
+
+        left = parts[0] if len(parts) >= 1 else None
+        right = parts[1] if len(parts) >= 2 else None
+
+        # helper to resolve a named component -> (obj, type)
         component_types = ["cpu", "gpu",
                            "motherboard", "ram", "storage", "psu"]
 
-        # detect what the user is asking FOR (asked_type), e.g. "motherboard" or "cpu"
-        asked_type = None
-        for comp_type in component_types:
-            if re.search(rf"\b{comp_type}s?\b", q):
-                asked_type = comp_type
-                break
+        def resolve(name_text):
+            """
+            Robust resolver for a free-text component name:
+              - cleans punctuation and leading verbs (e.g., 'is', 'does')
+              - tries chip-id lookup on several cleaned variants
+              - falls back to fuzzy best-match
+            Returns (obj, type) or (None, None)
+            """
+            if not name_text:
+                return None, None
 
-        # robustly detect a named component mentioned in query
-        target_obj, target_type = _best_match_in_dataset(query, data)
-        print(
-            "DEBUG: _best_match_in_dataset ->",
-            getattr(target_obj, "get", None) and target_obj.get(
-                "name") or None,
-            target_type,
-        )
+            # Work on a cleaned copy (but keep original for debug)
+            raw = str(name_text).strip()
 
-        # ---------- CASE A: user asked for a TYPE and mentioned a specific component ----------
-        if asked_type and target_obj:
-            # USER: "What CPU is compatible with RAMSTA RS-B450MP?"
-            if asked_type == "cpu" and target_type == "motherboard":
-                mobo_socket = (target_obj.get("socket") or "").lower()
+            # Remove common leading question words / verbs and trailing punctuation
+            # e.g.: "is RAMSTA RS-B450MP? " -> "RAMSTA RS-B450MP"
+            clean = raw
+            clean = re.sub(
+                r'^[\s\?!"\']*(is|does|do|can|could|would|will|are|am|was|were)\b[\s\:?]*', '', clean, flags=re.IGNORECASE)
+            clean = clean.strip()
+            clean = re.sub(r'^[\(\[]+|[\)\]\.:;!?,]+$', '', clean).strip()
+
+            # also try removing stray question marks / punctuation inside
+            alt1 = re.sub(r'[?!"\']', '', clean).strip()
+
+            # prioritize exact chip-id / slug style (try several variants)
+            variants = [clean, alt1, raw]
+
+            # If variant contains a leading "cpu:" or "gpu:" keep that; lookup handles it.
+            for v in variants:
+                try:
+                    v_str = v.strip()
+                    if not v_str:
+                        continue
+                    obj = None
+                    # 1) direct chip-id aware lookup
+                    lookup_fn = globals().get("lookup_component_by_chip_id")
+                    if callable(lookup_fn):
+                        try:
+                            obj = lookup_fn(v_str)
+                        except Exception:
+                            obj = None
+                    if obj:
+                        # determine type based on dataset buckets if possible
+                        for t in component_types:
+                            if obj in (data.get(t, {}) or {}).values():
+                                return obj, t
+                        # otherwise, use object's 'type' field if present
+                        return obj, (obj.get("type") or None)
+                except Exception:
+                    # continue trying other variants
+                    continue
+
+            # fallback: fuzzy best-match
+            try:
+                obj, typ = _best_match_in_dataset(clean, data)
+                if obj:
+                    return obj, typ
+            except Exception:
+                pass
+
+            # final fallback: try slug match directly across data (more permissive)
+            try:
+                s = slugify(clean)
+                for comp_type, bucket in data.items():
+                    for k, v in (bucket or {}).items():
+                        if slugify(v.get("name", "")) == s:
+                            return v, comp_type
+            except Exception:
+                pass
+
+            return None, None
+
+        a_obj, a_type = resolve(left) if left else (None, None)
+        b_obj, b_type = resolve(right) if right else (None, None)
+
+        # chipset -> socket hints (extend if needed)
+        chipset_to_socket = {
+            "z790": "lga1700", "z690": "lga1700", "b760": "lga1700", "h610": "lga1700",
+            "b550": "am4", "x570": "am4", "b450": "am4", "b650": "am5", "x670": "am5"
+        }
+
+        def detect_socket_from_text(s):
+            if not s:
+                return None
+            s_low = s.lower()
+            m = re.search(
+                r"\b(am[45]\b|am\d+|lga\s*\d{3,4}|lga\d{3,4})\b", s_low)
+            if m:
+                return m.group(0).replace(" ", "")
+            for tk, sock in chipset_to_socket.items():
+                if tk in s_low:
+                    return sock
+            return None
+
+        # --- CASE: both resolved ---
+        if a_obj and b_obj:
+            # decide which is CPU and which is motherboard (prefer explicit types)
+            def looks_cpu(t, obj):
+                return (t == "cpu") or ("cpu" in (obj.get("type") or "").lower()) or bool(re.search(r"\b(ryzen|intel|core|i\d|xeon|athlon)\b", (obj.get("name") or "").lower()))
+
+            def looks_mobo(t, obj):
+                return (t == "motherboard") or ("motherboard" in (obj.get("type") or "").lower()) or bool(re.search(r"\b(z\d+|b\d+|x\d+|h\d+)\b", (obj.get("name") or "").lower()))
+
+            cpu = None
+            mobo = None
+            # assign by explicit types first
+            if looks_cpu(a_type, a_obj):
+                cpu = a_obj
+            if looks_cpu(b_type, b_obj):
+                cpu = b_obj
+            if looks_mobo(a_type, a_obj):
+                mobo = a_obj
+            if looks_mobo(b_type, b_obj):
+                mobo = b_obj
+
+            # if still ambiguous, attempt to infer by name heuristics
+            if not cpu:
+                if looks_cpu(None, a_obj):
+                    cpu = a_obj
+                elif looks_cpu(None, b_obj):
+                    cpu = b_obj
+            if not mobo:
+                if looks_mobo(None, a_obj):
+                    mobo = a_obj
+                elif looks_mobo(None, b_obj):
+                    mobo = b_obj
+
+            # If CPU + Motherboard pair identified -> check socket compatibility
+            if cpu and mobo:
+                cpu_socket = (cpu.get("socket") or "").lower()
+                mobo_socket = (mobo.get("socket") or "").lower()
+
+                # try inferring missing sockets from names / query tokens
                 if not mobo_socket:
-                    result[
-                        "message"] = f"No socket information available for {target_obj.get('name', 'that motherboard')}."
-                    return result
-                matches = [
-                    c
-                    for c in data.get("cpu", {}).values()
-                    if mobo_socket and mobo_socket in (c.get("socket") or "").lower()
-                ]
-                if not matches:
-                    result[
-                        "message"] = f"I couldn’t find any CPUs compatible with {target_obj.get('name')}."
-                    return result
-                result.update({
-                    "found": True,
-                    "target": target_obj.get("name"),
-                    "compatible_type": "cpu",
-                    "reason": f"CPUs that fit socket {target_obj.get('socket', '')}",
-                    "chips": build_chips(matches, "cpu"),
-                })
-                return result
-
-            # USER: "What motherboard is compatible with Ryzen 5 5600X?"
-            if asked_type == "motherboard" and target_type == "cpu":
-                cpu_socket = (target_obj.get("socket") or "").lower()
+                    mobo_socket = detect_socket_from_text(
+                        mobo.get("name") or "") or detect_socket_from_text(q_raw)
                 if not cpu_socket:
-                    result[
-                        "message"] = f"No socket information available for {target_obj.get('name', 'that CPU')}."
-                    return result
-                matches = [
-                    m
-                    for m in data.get("motherboard", {}).values()
-                    if cpu_socket and cpu_socket in (m.get("socket") or "").lower()
-                ]
-                if not matches:
-                    result[
-                        "message"] = f"I couldn’t find any motherboards compatible with {target_obj.get('name')}."
-                    return result
-                result.update({
+                    cpu_socket = detect_socket_from_text(
+                        cpu.get("name") or "") or detect_socket_from_text(q_raw)
+
+                norm_cpu = (cpu_socket or "").replace(" ", "")
+                norm_mobo = (mobo_socket or "").replace(" ", "")
+
+                # if we have both sockets, compare
+                if norm_cpu and norm_mobo:
+                    if norm_cpu == norm_mobo or norm_cpu in norm_mobo or norm_mobo in norm_cpu:
+                        return {
+                            "found": True,
+                            "target": mobo.get("name"),
+                            "compatible_type": "cpu",
+                            "reason": f"{cpu.get('name')} is compatible with {mobo.get('name')} (socket {mobo.get('socket') or mobo_socket}).",
+                            "chips": build_chips([cpu], "cpu")
+                        }
+                    else:
+                        # not compatible -> offer CPUs that fit this motherboard (if any)
+                        fits = [
+                            c for c in data.get("cpu", {}).values()
+                            if norm_mobo and norm_mobo in ((c.get("socket") or "").lower().replace(" ", ""))
+                        ]
+                        if fits:
+                            return {
+                                "found": True,
+                                "target": mobo.get("name"),
+                                "compatible_type": "cpu",
+                                "reason": f"{cpu.get('name')} is NOT compatible with {mobo.get('name')}. Here are CPUs in the dataset that fit socket {mobo.get('socket') or mobo_socket}:",
+                                "chips": build_chips(fits, "cpu")
+                            }
+                        return {
+                            "found": True,
+                            "target": mobo.get("name"),
+                            "compatible_type": "cpu",
+                            "reason": f"{cpu.get('name')} is NOT compatible with {mobo.get('name')}.",
+                            "chips": []
+                        }
+
+                # if sockets missing, fallback to generic compatibility check (best-effort)
+                try:
+                    # reuse your compatible() function as a heuristic (it returns bool)
+                    is_compat = None
+                    if callable(globals().get("compatible")):
+                        # call with minimal arguments (mobo, cpu, ram, gpu, psu)
+                        is_compat = compatible(mobo, cpu, None, None, None)
+                    if is_compat is not None:
+                        return {
+                            "found": True,
+                            "target": mobo.get("name"),
+                            "compatible_type": "cpu",
+                            "reason": f"Compatibility heuristic: {bool(is_compat)} (socket info incomplete).",
+                            "chips": build_chips([cpu], "cpu") if is_compat else []
+                        }
+                except Exception:
+                    pass
+
+                # last resort
+                return {
                     "found": True,
-                    "target": target_obj.get("name"),
-                    "compatible_type": "motherboard",
-                    "reason": f"Motherboards with socket {target_obj.get('socket', '')}",
-                    "chips": build_chips(matches, "motherboard"),
-                })
-                return result
+                    "message": f"I found both '{cpu.get('name')}' and '{mobo.get('name')}', but I don't have enough socket info to be certain. Example: details {mobo.get('name')}"
+                }
 
-            # USER: "What motherboard is compatible with <RAM module>?"
-            if asked_type == "motherboard" and target_type == "ram":
-                ram_type = (target_obj.get("ram_type") or "").lower()
-                if not ram_type:
-                    result[
-                        "message"] = f"No RAM type information available for {target_obj.get('name', 'that RAM')}."
-                    return result
-                matches = [
-                    m
-                    for m in data.get("motherboard", {}).values()
-                    if ram_type and ram_type in (m.get("ram_type") or "").lower()
-                ]
-                if not matches:
-                    result[
-                        "message"] = f"I couldn’t find any motherboards compatible with {target_obj.get('name')}."
-                    return result
-                result.update({
-                    "found": True,
-                    "target": target_obj.get("name"),
-                    "compatible_type": "motherboard",
-                    "reason": f"Motherboards that support {target_obj.get('ram_type', '')}",
-                    "chips": build_chips(matches, "motherboard"),
-                })
-                return result
+            # If both resolved but not CPU+Motherboard pair, provide a generic answer prompting user what they want
+            return {
+                "found": True,
+                "message": f"I found both components: '{a_obj.get('name')}' and '{b_obj.get('name')}'. Tell me what you want — 'details', 'compatibility', or 'bottleneck' — and I'll give the right info. Example: details {a_obj.get('name')}"
+            }
 
-            # USER: "What PSU is compatible with RTX 3060?" (heuristic)
-            if asked_type == "psu" and target_type == "gpu":
-                matches = list(data.get("psu", {}).values())
-                if not matches:
-                    result[
-                        "message"] = f"I couldn’t find PSUs compatible with {target_obj.get('name')}."
-                    return result
-                result.update({
-                    "found": True,
-                    "target": target_obj.get("name"),
-                    "compatible_type": "psu",
-                    "reason": "Suggested PSUs (check wattage vs GPU power draw)",
-                    "chips": build_chips(matches, "psu"),
-                })
-                return result
+        # --- CASE: one resolved, other missing ---
+        if (a_obj and not b_obj) or (b_obj and not a_obj):
+            found_obj = a_obj or b_obj
+            found_type = a_type or b_type
+            missing_text = (right if not b_obj else left) if (
+                not b_obj or not a_obj) else None
 
-            # GPU requested for a motherboard (most motherboards have PCIe x16)
-            if asked_type == "gpu" and target_type == "motherboard":
-                matches = list(data.get("gpu", {}).values())
-                if not matches:
-                    result[
-                        "message"] = f"I couldn’t find any GPUs compatible with {target_obj.get('name')}."
-                    return result
-                result.update({
-                    "found": True,
-                    "target": target_obj.get("name"),
-                    "compatible_type": "gpu",
-                    "reason": "GPUs that fit PCIe x16 slots (verify physical fit & power requirements)",
-                    "chips": build_chips(matches, "gpu"),
-                })
-                return result
+            # If motherboard found -> suggest CPUs that match its socket (or explain missing socket)
+            if found_type == "motherboard":
+                mobo = found_obj
+                mobo_socket = (mobo.get("socket") or "").lower() or detect_socket_from_text(
+                    mobo.get("name") or "") or detect_socket_from_text(q_raw)
+                if mobo_socket:
+                    matches = [
+                        c for c in data.get("cpu", {}).values()
+                        if mobo_socket.replace(" ", "") in ((c.get("socket") or "").lower().replace(" ", ""))
+                    ]
+                    if matches:
+                        return {
+                            "found": False,
+                            "message": f'I found the motherboard "{mobo.get("name")}" in my dataset. I could not find the other component in your question. Here are CPUs in my dataset that match socket "{mobo_socket}":',
+                            "chips": build_chips(matches, "cpu")
+                        }
+                    else:
+                        return {
+                            "found": False,
+                            "message": f'I found "{mobo.get("name")}" but I do not have any CPUs in the dataset that declare socket "{mobo_socket}". Example: details {mobo.get("name")}'
+                        }
+                return {
+                    "found": False,
+                    "message": f'I found "{mobo.get("name")}" but socket information is missing in the dataset. Ask "details {mobo.get("name")}" to see stored fields (if any).'
+                }
 
-            # fallback for unhandled combos
-            result[
-                "message"] = f"I don’t have a rule for matching {asked_type} with {target_obj.get('name')} in the dataset."
-            return result
+            # If CPU found -> suggest motherboards that support its socket
+            if found_type == "cpu":
+                cpu = found_obj
+                cpu_socket = (cpu.get("socket") or "").lower() or detect_socket_from_text(
+                    cpu.get("name") or "") or detect_socket_from_text(q_raw)
+                if cpu_socket:
+                    matches = [
+                        m for m in data.get("motherboard", {}).values()
+                        if cpu_socket.replace(" ", "") in ((m.get("socket") or "").lower().replace(" ", ""))
+                    ]
+                    if matches:
+                        return {
+                            "found": False,
+                            "message": f'I found the CPU "{cpu.get("name")}" in my dataset. I could not identify the other component in your question. Here are motherboards that support socket "{cpu_socket}":',
+                            "chips": build_chips(matches, "motherboard")
+                        }
+                    else:
+                        return {
+                            "found": False,
+                            "message": f'I found "{cpu.get("name")}" but no motherboards in my dataset explicitly list socket "{cpu_socket}". Example: details {cpu.get("name")}'
+                        }
+                return {
+                    "found": False,
+                    "message": f'I found "{cpu.get("name")}" but socket information is missing. Ask "details {cpu.get("name")}" to see stored fields (if any).'
+                }
 
-        # ---------- CASE B: asked_type provided but no specific named target (type-to-type) ----------
-        if asked_type and not target_obj:
-            # DDRx-specific motherboard query: "Which motherboards support DDR4?"
-            if asked_type == "motherboard" and (("ddr4" in q) or ("ddr5" in q) or re.search(r"\bddr\d\b", q)):
-                desired = "ddr5" if "ddr5" in q else (
-                    "ddr4" if "ddr4" in q else None)
-                matches = [
-                    m
-                    for m in data.get("motherboard", {}).values()
-                    if desired and desired in (m.get("ram_type") or "").lower()
-                ]
-                if matches:
-                    result.update({
-                        "found": True,
-                        "target": f"Motherboards supporting {desired.upper()}",
-                        "compatible_type": "motherboard",
-                        "reason": f"Motherboards that support {desired.upper()} RAM",
-                        "chips": build_chips(matches, "motherboard"),
-                    })
-                    return result
+            # Generic missing-component guidance
+            sample_example = missing_text or "the other component"
+            return {
+                "found": False,
+                "message": f'The provided dataset does not contain information about "{sample_example}" or it was ambiguous. Please specify a model present in the dataset, or ask for "details <name>" / "compatibility <A> with <B>". Example: details MSI MPG Z790 CARBON WIFI'
+            }
 
-            # Socket-specific CPU query: "Which CPUs work with AM4 socket motherboards?"
-            # Detect common socket tokens in the normalized query (am4, am5, lga1700, etc.)
-            socket_match = re.search(r"\b(am\d+|lga\s*\d+)\b", q_norm or q)
-            if asked_type == "cpu" and socket_match:
-                # normalize e.g. "lga 1700" -> "lga1700"
-                sock_token = socket_match.group(1).replace(" ", "").lower()
-                matches = [
-                    c
-                    for c in data.get("cpu", {}).values()
-                    if sock_token and sock_token in (c.get("socket") or "").lower().replace(" ", "")
-                ]
-                if matches:
-                    result.update({
-                        "found": True,
-                        "target": f"CPUs for socket {sock_token.upper()}",
-                        "compatible_type": "cpu",
-                        "reason": f"CPUs that fit socket {sock_token.upper()}",
-                        "chips": build_chips(matches, "cpu"),
-                    })
-                    return result
-
-            if asked_type == "gpu":
-                # user asked "which GPUs" or similar - show GPUs
-                matches = list(data.get("gpu", {}).values())
-                result.update({
-                    "found": True,
-                    "target": "GPUs",
-                    "compatible_type": "gpu",
-                    "reason": "Available GPUs (verify physical fit & power requirements)",
-                    "chips": build_chips(matches, "gpu"),
-                })
-                return result
-
-            if asked_type == "cpu":
-                matches = list(data.get("cpu", {}).values())
-                result.update({
-                    "found": True,
-                    "target": "CPUs",
-                    "compatible_type": "cpu",
-                    "reason": "CPUs grouped by socket",
-                    "chips": build_chips(matches, "cpu"),
-                })
-                return result
-
-            if asked_type == "ram":
-                # list motherboards (since user asked about RAM -> show motherboards supporting RAM types)
-                matches = list(data.get("motherboard", {}).values())
-                result.update({
-                    "found": True,
-                    "target": "RAM modules",
-                    "compatible_type": "motherboard",
-                    "reason": "Motherboards that support DDR4/DDR5",
-                    "chips": build_chips(matches, "motherboard"),
-                })
-                return result
-
-            result["message"] = f"I can show typical compatible components for {asked_type}, but for precise matching I need a specific model."
-            return result
-
-        # ---------- CASE C: only a specific component mentioned but user didn't say what they want ----------
-        if target_obj and not asked_type:
-            # default to suggesting motherboards for CPUs
-            if target_type == "cpu":
-                cpu_socket = (target_obj.get("socket") or "").lower()
-                matches = [
-                    m
-                    for m in data.get("motherboard", {}).values()
-                    if cpu_socket and cpu_socket in (m.get("socket") or "").lower()
-                ]
-                if matches:
-                    result.update({
-                        "found": True,
-                        "target": target_obj.get("name"),
-                        "compatible_type": "motherboard",
-                        "reason": f"Motherboards with socket {target_obj.get('socket', '')}",
-                        "chips": build_chips(matches, "motherboard"),
-                    })
-                    return result
-            result["message"] = "I found that component but not sure what compatibility you want—ask e.g. 'What motherboard is compatible with <name>?'"
-            return result
-
-        # ---------- nothing matched ----------
-        result["message"] = "I couldn’t find any component in the dataset that matches what you mentioned."
-        return result
+        # --- CASE: nothing resolved ---
+        return {
+            "found": False,
+            "message": f'The provided dataset does not contain information about "{q_raw}". Therefore, I cannot provide details about it. Try: details <name> or compatibility <A> with <B>. Example: details MSI MPG Z790 CARBON WIFI'
+        }
 
     except Exception as e:
         logger.exception("get_compatible_components failed:")
-        return {"found": False, "error": str(e), "message": "Compatibility resolver error."}
+        return {"found": False, "message": "Compatibility resolver error."}
 
 
 # --------------------------
@@ -627,7 +686,7 @@ def gemini_fallback_with_data(user_input: str, context_data: dict) -> str:
 
         # ---------- Build summary formatting instruction ----------
         build_template = f"""
-You are ARsemble AI — a professional PC-building assistant.
+You are ARIA AI — a professional PC-building assistant.
 When the user asks about a PC build or lists multiple components, return a single clean build summary USING THIS EXACT FORMAT (use emojis and dividers, keep line breaks and spacing):
 
 💻 PC Build Summary
@@ -1084,15 +1143,12 @@ def lookup_component_by_chip_id(chip_id_or_slug: str):
 
 def get_component_details(raw: str):
     """
-    Improved flexible lookup for any component (cpu, gpu, motherboard, ram, storage, psu).
-    - Tries direct chip-id / slug lookup first (lookup_component_by_chip_id).
+    Flexible lookup for any component (cpu, gpu, motherboard, ram, storage, psu).
+    - Tries direct chip-id / slug lookup first (via lookup_component_by_chip_id if available).
     - Uses _best_match_in_dataset for robust fuzzy matching.
     - If no confident match, returns 'suggestions' (top close matches) to help the user.
-    - Always returns a dict; useful fields:
-        - found: bool
-        - name, type, price, specs  (if found)
-        - suggestions: list of {"name","type","score"} (if not found or low confidence)
-        - debug: optional diagnostic string for logs
+    - Special case: if the query looks like a motherboard and not found, return explicit message.
+    - Always returns a dict with helpful keys.
     """
     try:
         if not raw or not isinstance(raw, str):
@@ -1105,8 +1161,16 @@ def get_component_details(raw: str):
         logger.debug("LOOKUP START: query_raw=%r, q_slug=%r, q_norm=%r",
                      query_raw, q_slug, query_norm)
 
-        # 1) direct chip-id or slug-aware lookup (supports "cpu:amd-ryzen-5-3600" and plain names)
-        direct = lookup_component_by_chip_id(query_raw)
+        # 1) Try direct lookup via lookup_component_by_chip_id() if available (safe via globals)
+        direct = None
+        lookup_fn = globals().get("lookup_component_by_chip_id")
+        if callable(lookup_fn):
+            try:
+                direct = lookup_fn(query_raw)
+            except Exception:
+                logger.exception(
+                    "lookup_component_by_chip_id raised; falling back to fuzzy.")
+
         if direct:
             logger.debug("LOOKUP: direct lookup_component_by_chip_id -> %r (%s)",
                          direct.get("name"), direct.get("type"))
@@ -1133,7 +1197,27 @@ def get_component_details(raw: str):
                 "debug": "best_match_in_dataset"
             }
 
-        # 3) fallback fuzzy ranking: compute simple token-overlap scores across dataset to produce suggestions
+        # 3) If nothing matched, check if the query looks like a motherboard model/name.
+        #    If so, return the explicit message requested by the user.
+        #    Tweak/add tokens here as needed for your user base.
+        mobo_tokens = [
+            "msi", "asus", "gigabyte", "asrock", "mpg", "mag", "aorus", "taichi", "tuf", "rog",
+            "carbon", "z790", "z690", "b550", "b450", "x570", "h610", "h510", "b660",
+            "mobo", "motherboard", "m.2", "wifi", "wifi6", "pro", "gaming", "steel", "carbon",
+            "msi mpg", "mpg z790", "stealth"
+        ]
+        q_low = (query_raw or "").lower()
+        looks_like_mobo = any(tok in q_low for tok in mobo_tokens)
+
+        if looks_like_mobo:
+            # EXACT user-requested text when a motherboard-like query isn't in the dataset
+            return {
+                "found": False,
+                "error": f'I cannot provide information about the "{query_raw}" as it is not present in my dataset. My dataset includes information on CPUs and GPUs, not motherboards.',
+                "debug": "missing_motherboard_explicit_message"
+            }
+
+        # 4) fallback fuzzy ranking: compute simple token-overlap scores across dataset to produce suggestions
         q_tokens = set([t for t in re.split(r"\s+", query_norm) if t])
         scores = []
         for ctype in ("cpu", "gpu", "motherboard", "ram", "storage", "psu"):
@@ -1167,7 +1251,8 @@ def get_component_details(raw: str):
                 seen.add(key)
                 suggestions.append(
                     {"name": name, "type": ctype, "score": int(sc)})
-        # 4) final response
+
+        # 5) final response (suggestions or not-found)
         if suggestions:
             logger.debug("LOOKUP: suggestions -> %s", suggestions[:5])
             return {
@@ -1180,6 +1265,7 @@ def get_component_details(raw: str):
         logger.debug(
             "LOOKUP: no match found for %r in any category.", query_raw)
         return {"found": False, "error": f"I cannot find '{raw}' in my database.", "debug": "no matches at all"}
+
     except Exception as e:
         logger.exception("get_component_details failed:")
         return {"found": False, "error": "Lookup failed due to an internal error.", "exception": str(e)}
