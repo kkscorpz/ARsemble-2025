@@ -1,67 +1,86 @@
 # server.py
-# Unified ARsemble server — serves static UI and proxies API to FastAPI backend
+# Unified ARsemble AI Server (Frontend + API)
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from waitress import serve
-import requests
 import os
 import logging
+import traceback
+
+# --- Import the main AI handler ---
+from arsemble_ai import get_ai_response
 
 # --- Config ---
-API_BACKEND = os.getenv(
-    "ARSSEMBLE_API", "http://127.0.0.1:8080")  # FastAPI backend
 HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
 PORT = int(os.getenv("ARSSEMBLE_PORT", "10000"))
 
 # --- Logging ---
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s: %(message)s")
-logger = logging.getLogger("ARsemble-Server")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s: %(message)s"
+)
+logger = logging.getLogger("ARsemble")
 
 # --- Flask App ---
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
-
-@app.before_request
-def log_request():
-    logger.info(f"Request: {request.method} {request.path}")
-
-# --- Serve index.html ---
+# --- Serve frontend ---
 
 
 @app.route("/")
 def index():
+    """Serve the main UI (index.html)."""
     return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/<path:filename>")
 def static_files(filename):
+    """Serve static frontend files."""
     return send_from_directory(app.static_folder, filename)
 
-# --- Proxy endpoint for /api/recommend ---
+# --- Unified AI API ---
 
 
 @app.route("/api/recommend", methods=["POST"])
-def proxy_recommend():
+def recommend_api():
+    """Handles all AI queries: build, PSU, bottleneck, etc."""
     try:
-        body = request.get_json(force=True)
-        resp = requests.post(f"{API_BACKEND}/api/ask", json=body)
-        return jsonify(resp.json())
+        body = request.get_json(force=True) or {}
+        query = (body.get("query") or "").strip()
+
+        if not query:
+            return jsonify({"error": "Missing 'query' in request"}), 400
+
+        logger.info(f"Received AI query: {query}")
+
+        # Call AI core
+        result = get_ai_response(query)
+
+        # Normalize output
+        if isinstance(result, dict):
+            return jsonify(result)
+        else:
+            return jsonify({"source": "local", "text": str(result)})
+
     except Exception as e:
-        logger.exception("Proxy /api/recommend failed:")
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Error in /api/recommend")
+        return jsonify({
+            "error": "Server error",
+            "detail": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
-# --- Simple ping ---
+# --- Health check ---
 
 
-@app.route("/api/ping", methods=["GET"])
-def ping():
-    return jsonify({"status": "ok", "message": "ARsemble Flask proxy running"})
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "message": "ARsemble AI running!"})
 
 
 # --- Run with Waitress ---
 if __name__ == "__main__":
-    logger.info(f"Starting unified ARsemble server on {HOST}:{PORT}")
+    logger.info(f"Starting ARsemble unified API on http://{HOST}:{PORT}")
     serve(app, host=HOST, port=PORT)
