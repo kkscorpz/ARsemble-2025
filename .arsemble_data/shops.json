@@ -1,0 +1,37 @@
+{
+  "smfp_computer": {
+    "name": "SMFP Computer",
+    "address": "594 J Nepomuceno St, Quiapo, Manila, 1001 Metro Manila",
+    "region": "Metro Manila",
+    "public": true,
+    "notes": "Client shop provided via chat."
+  },
+  "pc_express": {
+    "name": "PC Express",
+    "address": "Gilmore Avenue, New Manila, Quezon City, Metro Manila",
+    "region": "Metro Manila",
+    "public": true,
+    "notes": "Major national PC retailer with multiple branches."
+  },
+  "dynquestpc": {
+    "name": "DynaQuest PC",
+    "address": "SM City North EDSA Cyberzone, Quezon City, Metro Manila",
+    "region": "Metro Manila",
+    "public": true,
+    "notes": "Well-known tech store offering gaming parts and peripherals."
+  },
+  "easypc": {
+    "name": "EasyPC",
+    "address": "Gilmore IT Center, Aurora Blvd, Quezon City, Metro Manila",
+    "region": "Metro Manila",
+    "public": true,
+    "notes": "Popular chain known for affordable PC parts and online ordering."
+  },
+  "pchub": {
+    "name": "PC Hub",
+    "address": "Gilmore Ave, Quezon City, Metro Manila",
+    "region": "Metro Manila",
+    "public": true,
+    "notes": "Trusted PC parts shop in Gilmore with custom build services."
+  }
+}

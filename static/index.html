@@ -228,6 +228,82 @@
         return wrapper;
       }
 
+      // Generic chip renderer used by multiple handlers (kept for starter chips / small sets)
+      function renderChips(
+        items = [],
+        onClickFn = null,
+        labelKey = "text",
+        showPrice = true
+      ) {
+        if (!Array.isArray(items) || items.length === 0) return;
+        const row = document.createElement("div");
+        row.className = "chip-row";
+
+        items.forEach((c) => {
+          const chip = document.createElement("div");
+          chip.className = "chip";
+
+          // Items may be "chip" objects or build objects — try to be flexible
+          const text =
+            typeof c === "string"
+              ? c
+              : c[labelKey] ||
+                (c.meta && c.meta.name) ||
+                c.text ||
+                c.id ||
+                c.name ||
+                "Unknown";
+
+          const priceVal =
+            c && (c.price || (c.meta && c.meta.price))
+              ? c.price || c.meta.price
+              : "";
+          const price = priceVal ? ` — ${priceVal}` : "";
+
+          chip.textContent = showPrice ? `${text}${price}` : text;
+
+          // attach id if present for lookupChip (dataset is easiest to pick up)
+          if (c && c.id) chip.dataset.chipid = c.id;
+
+          chip.addEventListener("click", (ev) => {
+            try {
+              if (typeof onClickFn === "function") return onClickFn(c, ev);
+
+              // default behaviour: if chip has id -> lookupChip
+              const explicitId = c && (c.id || chip.dataset.chipid);
+              if (explicitId) return lookupChip(explicitId);
+
+              // if chip is a build-like object and contains encoded build payload, try triggering onBuildTap
+              if (c && chip.dataset && chip.dataset.build)
+                return onBuildTap(chip);
+
+              // fallback: if object contains meta.name + type, try lookup by constructed id
+              if (c && c.meta && c.meta.name && c.type) {
+                const id = `${c.type}:${(c.meta.name || "")
+                  .toLowerCase()
+                  .replace(/\s+/g, "-")}`;
+                return lookupChip(id);
+              }
+
+              // last resort: try constructing from text + type
+              if (c && c.type && text) {
+                const id = `${c.type}:${text
+                  .toLowerCase()
+                  .replace(/\s+/g, "-")}`;
+                return lookupChip(id);
+              }
+            } catch (err) {
+              console.error("Chip click handler error:", err);
+            }
+          });
+
+          row.appendChild(chip);
+        });
+
+        chat.appendChild(row);
+        chat.scrollTop = chat.scrollHeight;
+      }
+
       // 💸 BUILD RECOMMENDATIONS (Tapable)
       function renderBuildRecommendations(results, maxBuilds = 3) {
         appendAssistant(`Here are some recommended builds you can explore:`);
@@ -253,32 +329,22 @@
         chat.scrollTop = chat.scrollHeight;
       }
 
-      // ⚙️ COMPATIBILITY RECOMMENDATIONS (Tapable)
+      // ⚙️ COMPATIBILITY RECOMMENDATIONS (Plain text — non-tapable)
+      // (Kept for fallback but not used in ask() by default.)
       function renderCompatibility(data) {
         if (data.results && data.results.length) {
-          appendAssistant(
-            `The ${
-              data.target
-            } is compatible with these ${data.compatible_type.toUpperCase()}s:`
-          );
-          const row = document.createElement("div");
-          row.className = "chip-row";
+          // Friendly header
+          let out = `The ${data.target} is compatible with these ${(
+            data.compatible_type || "component"
+          ).toUpperCase()}s:\n\n`;
 
-          data.results.forEach((c) => {
-            const chip = document.createElement("div");
-            chip.className = "chip";
-            chip.textContent = `${c.text}${c.price ? ` (${c.price})` : ""}`;
-            chip.onclick = () =>
-              lookupChip(
-                `${c.type}:${(c.meta?.name || c.text)
-                  .toLowerCase()
-                  .replace(/\s+/g, "-")}`
-              );
-            row.appendChild(chip);
+          // Render up to a reasonable preview as plain-text list (no clickable chips)
+          data.results.slice(0, 12).forEach((c) => {
+            const price = c.price || (c.meta && c.meta.price) || "";
+            out += `- ${c.text}${price ? ` (${price})` : ""}\n`;
           });
 
-          chat.appendChild(row);
-          chat.scrollTop = chat.scrollHeight;
+          appendAssistant(out);
         } else {
           appendAssistant(data.message || "No compatible components found.");
         }
@@ -295,12 +361,9 @@
           // --- Header (use total_price only)
           const total = build.total_price || null;
           const score = build.score ?? null;
-          if (total || score !== null) {
-            const formattedTotal = total
-              ? `₱${Number(total).toLocaleString()}`
-              : "";
-            const scorePart = score !== null ? ` — Score ${score}` : "";
-            lines.push(`Estimated total: ${formattedTotal}${scorePart}`);
+          if (total) {
+            const formattedTotal = `₱${Number(total).toLocaleString()}`;
+            lines.push(`Estimated total: ${formattedTotal}`);
             lines.push(""); // blank line
           }
 
@@ -496,7 +559,7 @@
         if (!query) return;
 
         appendUser(query);
-        const thinking = appendAssistant("💭 Thinking...");
+        const thinking = appendAssistant("ARIA Thinking...");
 
         try {
           const res = await fetch(API_BASE + "/api/recommend", {
@@ -536,64 +599,165 @@
             return;
           }
 
-          // 🧩 Handle compatibility
+          // 🧩 Handle compatibility (render TAPABLE chips)
           if (data.source === "local-compatibility") {
-            renderCompatibility(data);
+            if (Array.isArray(data.results) && data.results.length) {
+              // Header message
+              appendAssistant(
+                `The ${data.target} is compatible with these ${(
+                  data.compatible_type || "component"
+                ).toUpperCase()} options — tap any item to view specs:`
+              );
+
+              // Limit displayed chips to a reasonable number to avoid UI overload
+              const chipsToShow = data.results.slice(0, 12);
+
+              // Render tapable chips; clicking looks up the chip id (falling back to constructed id)
+              renderChips(
+                chipsToShow,
+                (c) => {
+                  // prefer explicit id
+                  const id =
+                    c.id ||
+                    (c.type && (c.meta?.name || c.text)
+                      ? `${c.type}:${(c.meta?.name || c.text)
+                          .toLowerCase()
+                          .replace(/\s+/g, "-")}`
+                      : null);
+                  if (id) return lookupChip(id);
+                },
+                "text",
+                true
+              );
+
+              // short reminder
+            } else {
+              // fallback message
+              appendAssistant(
+                data.message || "No compatible components found."
+              );
+            }
           }
-          // ⚡ Handle PSU responses
+          // ⚡ Handle PSU responses (plain text)
           else if (data.source === "local-psu") {
-            let text = `🔌 PSU Recommendation\n`;
-            text += `Detected: ${
+            let textOut = `🔌 PSU Recommendation\n`;
+            textOut += `Detected: ${
               data.detected_str || "components unknown"
             }\n\n`;
             // show per-component watts if present
             if (data.component_watts) {
               for (const [k, v] of Object.entries(data.component_watts)) {
-                text += `  ${k}: ${v} W\n`;
+                textOut += `  ${k}: ${v} W\n`;
               }
-              text += `\n`;
+              textOut += `\n`;
             }
-            text += `Estimated total draw: ${data.total_draw} W\n`;
-            text += `Recommended PSU (with headroom): ${data.recommended_psu} W\n`;
-            appendAssistant(text);
+            textOut += `Estimated total draw: ${data.total_draw} W\n`;
+            textOut += `Recommended PSU (with headroom): ${data.recommended_psu} W\n\n`;
 
-            // suggested PSU chips
+            // Suggested PSUs as plain text bullets (no clickable chips)
             if (
               Array.isArray(data.suggested_psu_chips) &&
               data.suggested_psu_chips.length
             ) {
-              const row = document.createElement("div");
-              row.className = "chip-row";
+              textOut += "Suggested PSUs:\n";
               data.suggested_psu_chips.forEach((chip) => {
-                const c = document.createElement("div");
-                c.className = "chip";
-                c.textContent = `${chip.text}${
-                  chip.price ? ` — ${chip.price}` : ""
-                }`;
-                c.onclick = () => lookupChip(chip.id);
-                row.appendChild(c);
+                const label =
+                  chip.text || (chip.meta && chip.meta.name) || "PSU";
+                const price =
+                  chip.price || (chip.meta && chip.meta.price) || "";
+                textOut += ` • ${label}${price ? ` — ${price}` : ""}\n`;
               });
-              chat.appendChild(row);
+              textOut += `\n(To inspect a PSU in detail, ask "show me specs of <PSU name>".)`;
             }
 
-            // recommended chip display
+            appendAssistant(textOut);
           }
-          // 💸 Handle budget builds
+          // 💸 Handle budget builds (only show Build chips, do NOT auto-render every component as chips)
           else if (
             data.source === "local-recommendation" &&
             Array.isArray(data.results)
           ) {
+            // render build buttons only
             const normalized = data.results.map((r) => ({
               message: r.message || "",
               chips: r.chips || [],
               total_price: r.total_price || null,
               score: r.score || null,
+              // keep original r for potential future use
+              _orig: r,
             }));
             renderBuildRecommendations(normalized, 3);
+
+            // Do NOT automatically render per-build component chips here.
+            // Build detail rendering happens when user taps a Build chip (onBuildTap).
           }
-          // 🤖 Handle Gemini text answers
+          // Handle local-list responses (server already composes plain text lists when dataset is large)
+          else if (data.source === "local-list") {
+            // Prefer backend-friendly plain text in data.text; fallback to small chips if explicitly provided and small
+            if (data.text) {
+              appendAssistant(data.text);
+            } else if (
+              Array.isArray(data.results) &&
+              data.results.length &&
+              data.results.length <= 8
+            ) {
+              // small sets can be rendered as chips (optional)
+              renderChips(
+                data.results,
+                (c) => {
+                  const id = c.id || null;
+                  if (id) lookupChip(id);
+                },
+                "text",
+                true
+              );
+            } else {
+              appendAssistant("No items found.");
+            }
+          }
+          // 🤖 Handle Gemini text answers and render any small attached chips (only if intentionally included)
           else if (data.text) {
             appendAssistant(data.text);
+
+            // Render chips only when backend intentionally returned a small 'results' set
+            if (
+              Array.isArray(data.results) &&
+              data.results.length &&
+              data.results.length <= 8
+            ) {
+              renderChips(
+                data.results,
+                (c) => {
+                  const id =
+                    c.id ||
+                    (c.type && (c.meta?.name || c.text)
+                      ? `${c.type}:${(c.meta?.name || c.text)
+                          .toLowerCase()
+                          .replace(/\s+/g, "-")}`
+                      : null);
+                  if (id) lookupChip(id);
+                },
+                "text",
+                true
+              );
+            }
+
+            if (
+              Array.isArray(data.chips) &&
+              data.chips.length &&
+              data.chips.length <= 8
+            ) {
+              renderChips(
+                data.chips,
+                (c) => {
+                  if (c.id) lookupChip(c.id);
+                },
+                "text",
+                true
+              );
+            }
+
+            // suggested_psu_chips intentionally ignored for clickable rendering here (PSU handling above shows plain list)
           } else {
             appendAssistant("No recommendations found. Server returned:");
             appendAssistant(JSON.stringify(data, null, 2));

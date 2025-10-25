@@ -1,3 +1,8 @@
+
+# --------------------------
+# my client data
+# --------------------------
+
 data = {
     "gpu": {
         "integrated graphics": {
