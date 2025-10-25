@@ -6,6 +6,8 @@ import os
 import logging
 import traceback
 import warnings
+from waitress import serve
+
 
 # Prefer environment-driven host/port
 HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
