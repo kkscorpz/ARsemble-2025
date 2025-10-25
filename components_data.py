@@ -15,7 +15,7 @@ data = {
             "price": "₱0 (included with CPU)",
             "compatibility": "Works with any compatible motherboard, no additional power required"
         },
-        "gtx 750 ti": {
+        "gtx 750ti": {
             "name": "NVIDIA GTX 750 Ti",
             "type": "GPU",
             "vram": "2GB GDDR5",
@@ -24,6 +24,36 @@ data = {
             "slot": "PCIe 3.0 x16",
             "price": "₱4,000",
             "compatibility": "PCIe x16 slot, 300W PSU recommended"
+        },
+        "gtx750ti": {
+            "name": "NVIDIA GTX 750 Ti",
+            "type": "GPU",
+            "vram": "2GB GDDR5",
+            "clock": "~1085 MHz (Boost)",
+            "power": "~60 Watts",
+            "slot": "PCIe 3.0 x16",
+            "price": "₱4,000",
+            "compatibility": "PCIe x16 slot, 300W PSU recommended"
+        },
+        "gtx 750ti": {
+            "name": "NVIDIA GTX 750 Ti",
+            "type": "GPU",
+            "vram": "2GB GDDR5",
+            "clock": "~1085 MHz (Boost)",
+            "power": "~60 Watts",
+            "slot": "PCIe 3.0 x16",
+            "price": "₱4,000",
+            "compatibility": "PCIe x16 slot, 300W PSU recommended"
+        },
+        "rtx4090": {
+            "name": "NVIDIA GeForce RTX 4090",
+            "type": "GPU",
+            "vram": "24GB GDDR6X",
+            "clock": "~2235 MHz (Boost)",
+            "power": "~450 Watts",
+            "slot": "PCIe 4.0 x16",
+            "price": "₱120,000",
+            "compatibility": "PCIe x16 slot, 850W+ PSU recommended, 16-pin/3x8-pin adapters"
         },
         "rtx 3050": {
             "name": "Gigabyte RTX 3050 EAGLE OC",

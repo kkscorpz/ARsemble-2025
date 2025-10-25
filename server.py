@@ -8,7 +8,6 @@ import traceback
 import warnings
 from waitress import serve
 
-
 # Prefer environment-driven host/port
 HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
 PORT = int(os.getenv("ARSSEMBLE_PORT", "10000"))
@@ -80,6 +79,46 @@ def recommend_api():
         if isinstance(resp, dict):
             src = resp.get("source", "")
 
+            # PSU Recommendation - ADD THIS HANDLER
+            if src == "local-psu":
+                # Format PSU response for frontend
+                psu_data = resp
+                detected = psu_data.get("detected_str", "components detected")
+                total_draw = psu_data.get("total_draw", 0)
+                recommended = psu_data.get("recommended_psu", 0)
+                component_watts = psu_data.get("component_watts", {})
+
+                text_lines = [
+                    "🔌 PSU Recommendation",
+                    f"Detected: {detected}",
+                    ""
+                ]
+
+                # Add component wattage breakdown
+                for comp, watts in component_watts.items():
+                    if watts > 0:
+                        text_lines.append(f"  {comp}: {watts} W")
+
+                text_lines.extend([
+                    "",
+                    f"Estimated total draw: {total_draw} W",
+                    f"Recommended PSU (with 30% headroom): {recommended} W",
+                    "",
+                    "Suggested PSU options:",
+                    "• InPlay GS 550 (550W) - ₱1,800",
+                    "• Corsair CX650 (650W) - ₱3,500",
+                    "• InPlay GS 750 (750W) - ₱2,500"
+                ])
+
+                return jsonify({
+                    "source": "local-psu",
+                    "text": "\n".join(text_lines),
+                    "type": "psu_recommendation",
+                    "total_draw": total_draw,
+                    "recommended_psu": recommended,
+                    "component_watts": component_watts
+                })
+
             # Local component details
             if src == "local-lookup" and resp.get("found"):
                 comp = resp.get("component", {})
@@ -117,7 +156,7 @@ def recommend_api():
                 return jsonify(resp)
 
             # Local structured outputs (builds, psu, compatibility) -> send as-is (frontend knows how to render)
-            if src in ("local-recommendation", "local-psu", "local-compatibility", "local-list"):
+            if src in ("local-recommendation", "local-compatibility", "local-list"):
                 return jsonify(resp)
 
             # Shops list
