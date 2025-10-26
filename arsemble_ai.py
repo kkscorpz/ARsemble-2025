@@ -1,3 +1,4 @@
+import time
 import math
 from typing import Any, Dict, Tuple, List
 import os
@@ -7,6 +8,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from components_data import data
 from storage import load_json, save_json
+
 
 import re
 import unicodedata
@@ -35,6 +37,46 @@ except Exception:
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = "gemini-2.5-flash-lite"  # Fast, low-latency Gemini model
+
+
+# --- BEGIN: stream_response wrapper (append to arsemble_ai.py) ---
+# This wrapper yields newline-delimited JSON chunks quickly by slicing the
+# blocking get_ai_response(prompt) text result. Keeps existing behavior intact.
+
+
+def stream_response(prompt, chunk_size: int = 256, delay: float = 0.0):
+    """
+    Generator that yields either dicts/strings/bytes.
+    - chunk_size: how many characters per chunk
+    - delay: optional small sleep between yields (0.0 for no sleep)
+    Usage: for item in stream_response(prompt): ...
+    """
+    try:
+        # call your existing blocking function
+        full = get_ai_response(prompt)
+        if full is None:
+            yield {"error": "no_result"}
+            return
+
+        # If result is a dict, emit it as a single object
+        if isinstance(full, dict):
+            yield full
+            return
+
+        text = str(full)
+        if not text:
+            yield {"text": ""}
+            return
+
+        # Emit slices as JSON-like dicts (server will JSON-encode)
+        for i in range(0, len(text), chunk_size):
+            part = text[i: i + chunk_size]
+            yield {"chunk": i // chunk_size, "text": part}
+            if delay and delay > 0:
+                time.sleep(delay)
+    except Exception as e:
+        yield {"error": "generation_error", "msg": str(e)}
+# --- END: stream_response wrapper ---
 
 
 def slugify(text: str) -> str:

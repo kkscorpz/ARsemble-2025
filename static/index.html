@@ -782,5 +782,80 @@
       // show starter suggestions when page loads
       window.addEventListener("load", showStarterSuggestions);
     </script>
+    <div
+      id="output"
+      style="
+        white-space: pre-wrap;
+        font-family: monospace;
+        padding: 12px;
+        border: 1px solid #ddd;
+      "
+    ></div>
+    <script>
+      async function streamAI(prompt) {
+        const out = document.getElementById("output");
+        out.textContent = "Connecting...\n";
+        try {
+          const res = await fetch(
+            "https://arsemble-2025.onrender.com/api/ai/stream",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt }),
+            }
+          );
+          if (!res.ok) {
+            out.textContent = "Request failed: " + res.status;
+            return;
+          }
+
+          out.textContent = ""; // clear on success
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let firstChunk = true;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const obj = JSON.parse(line);
+                if (obj.text) {
+                  out.textContent += obj.text;
+                } else if (obj.chunk) {
+                  out.textContent += obj.text || "";
+                } else {
+                  out.textContent += JSON.stringify(obj);
+                }
+                // signal Unity (optional) by changing title on first chunk
+                if (firstChunk) {
+                  document.title = "first-chunk";
+                  firstChunk = false;
+                }
+              } catch (e) {
+                console.warn("JSON parse error", e, line);
+              }
+            }
+          }
+
+          if (buffer.trim()) {
+            try {
+              const obj = JSON.parse(buffer);
+              if (obj.text) out.textContent += obj.text;
+            } catch (e) {}
+          }
+        } catch (err) {
+          out.textContent = "Network error: " + err.message;
+        }
+      }
+
+      // Auto-run for quick test:
+      streamAI("Hello — quick test prompt for streaming.");
+    </script>
   </body>
 </html>
