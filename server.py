@@ -1,55 +1,34 @@
 # server.py — Unified ARsemble AI server (UI + API)
-# Replaces the previous versions and avoids 405 by accepting GET/POST where appropriate.
-# Adds streaming JSON-lines endpoint /api/ai/stream and gzip compression.
+# Replaces previous versions. Adds streaming JSON-lines endpoint /api/ai/stream and gzip compression.
+# Static routes moved to the bottom so API routes are matched first (avoids 404/405 on /api/*).
 
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort, Response, stream_with_context
 from flask_cors import CORS
 from waitress import serve
 import os
 import logging
 import traceback
-
-# Import AI functions (must exist)
-# Keep your function imports for backward-compatible endpoints:
-from arsemble_ai import get_ai_response, get_component_details, list_shops
-
-# Also import the module for optional stream_response detection
-import arsemble_ai as arsemble_ai_mod
-
-# Additional helpers for streaming + compression
-from flask import Response, stream_with_context
-from flask_compress import Compress
 import json
 import threading
+from flask_compress import Compress
 
+# Import AI functions (must exist)
+from arsemble_ai import get_ai_response, get_component_details, list_shops
+import arsemble_ai as arsemble_ai_mod
+
+# Environment: prefer standard PORT env var (Render), fallback to ARSEMBLE_PORT then 10000
 HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
-PORT = int(os.getenv("ARSSEMBLE_PORT", "10000"))
+PORT = int(os.getenv("PORT", os.getenv("ARSSEMBLE_PORT", "10000")))
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("ARsemble")
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+# allow all origins for API routes (change to specific origin in production)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 # enable gzip compression for dynamic responses
 Compress(app)
-
-
-# Serve index / static files
-@app.route("/", methods=["GET"])
-def index():
-    try:
-        return send_from_directory(app.static_folder, "index.html")
-    except Exception:
-        abort(404)
-
-
-@app.route("/<path:filename>", methods=["GET"])
-def static_files(filename):
-    try:
-        return send_from_directory(app.static_folder, filename)
-    except Exception:
-        abort(404)
 
 
 # Unified AI endpoint (POST only for queries that change state or supply body)
@@ -69,7 +48,6 @@ def recommend_api():
         logger.info("AI query: %s", query)
         result = get_ai_response(query)
 
-        # If local-psu or local-lookup or other structured responses exist, keep them
         if isinstance(result, dict):
             return jsonify(result)
         else:
@@ -104,18 +82,11 @@ def ai_stream():
     if not prompt:
         return jsonify({"error": "missing 'prompt' in body"}), 400
 
-    # stream generator wrapper
     def gen():
-        """
-        Yields bytes. Uses arsemble_ai_mod.stream_response(prompt) if available (preferred).
-        Otherwise uses get_ai_response(prompt) and yields small chunks (fallback).
-        Each yielded item is a newline-terminated JSON text (JSON-lines).
-        """
         try:
-            # Preferred streaming interface if your ai module exposes it:
+            # If arsemble_ai_mod provides a stream_response generator, prefer it
             if hasattr(arsemble_ai_mod, "stream_response"):
                 for item in arsemble_ai_mod.stream_response(prompt):
-                    # item may be bytes, str, or dict
                     if isinstance(item, bytes):
                         yield item + b"\n"
                     elif isinstance(item, str):
@@ -124,9 +95,8 @@ def ai_stream():
                         yield (json.dumps(item) + "\n").encode("utf-8")
                 return
 
-            # Fallback: call your existing synchronous get_ai_response and stream in chunks
+            # Fallback: blocking get_ai_response, run in thread and stream slices
             if hasattr(arsemble_ai_mod, "get_ai_response"):
-                # run blocking generation in a background thread and capture the full result
                 result_container = {"result": None, "exc": None}
 
                 def _runner():
@@ -149,12 +119,10 @@ def ai_stream():
                 yield (json.dumps({"error": "no_result"}) + "\n").encode("utf-8")
                 return
 
-            # If result is dict => send as single JSON object
             if isinstance(result, dict):
                 yield (json.dumps(result) + "\n").encode("utf-8")
                 return
 
-            # Otherwise treat as text and stream in slices
             text = str(result)
             chunk_size = 256
             for i in range(0, len(text), chunk_size):
@@ -166,7 +134,6 @@ def ai_stream():
             except Exception:
                 pass
 
-    # stream_with_context ensures request context available while streaming
     return Response(stream_with_context(gen()), mimetype="application/json")
 
 
@@ -185,7 +152,6 @@ def lookup_api():
             return jsonify({"found": False, "error": "chip_id required (POST JSON or GET ?chip_id=)"}), 400
 
         details = get_component_details(chip_id)
-        # Expect details to be a dict with at least 'found' key
         return jsonify(details)
     except Exception as e:
         logger.exception("server error in /api/lookup")
@@ -207,6 +173,26 @@ def get_shops():
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "message": "ARsemble AI running!"})
+
+
+# Serve index / static files (moved to bottom so API routes are matched first)
+@app.route("/", methods=["GET"])
+def index():
+    try:
+        return send_from_directory(app.static_folder, "index.html")
+    except Exception:
+        abort(404)
+
+
+@app.route("/<path:filename>", methods=["GET"])
+def static_files(filename):
+    try:
+        full = os.path.join(app.static_folder, filename)
+        if os.path.exists(full):
+            return send_from_directory(app.static_folder, filename)
+        abort(404)
+    except Exception:
+        abort(404)
 
 
 if __name__ == "__main__":
