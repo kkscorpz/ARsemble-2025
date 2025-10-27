@@ -267,7 +267,7 @@ def health():
 @app.route("/", methods=["GET"])
 def index():
     try:
-        return send_from_directory(app.static_folder, "index.html")
+        return send_from_directory(app.static_folder, "/index.html")
     except Exception:
         abort(404)
 
