@@ -193,594 +193,619 @@
         <div class="send-btn" id="send">▲</div>
       </div>
     </div>
-
     <script>
-      // Use the same origin as the page to avoid origin mismatches
-      const API_BASE = window.location.origin;
-      const chat = document.getElementById("chat");
-      const qInput = document.getElementById("query");
-      const sendBtn = document.getElementById("send");
+      (function () {
+        // Use the same origin as the page to avoid origin mismatches
+        const API_BASE = window.location.origin;
 
-      // 🧍 USER MESSAGE
-      function appendUser(text) {
-        const wrapper = document.createElement("div");
-        wrapper.style.alignSelf = "flex-end";
-        wrapper.style.background = "#d0f0e0";
-        wrapper.style.padding = "12px 16px";
-        wrapper.style.borderRadius = "12px";
-        wrapper.style.color = "#0a2026";
-        wrapper.style.fontWeight = "600";
-        wrapper.style.maxWidth = "80%";
-        wrapper.style.wordWrap = "break-word";
-        wrapper.textContent = text;
-        chat.appendChild(wrapper);
-        chat.scrollTop = chat.scrollHeight;
-      }
+        // DOM refs (guarded)
+        const chat = document.getElementById("chat");
+        const qInput = document.getElementById("query");
+        const sendBtn = document.getElementById("send");
 
-      // 🤖 ASSISTANT MESSAGE
-      function appendAssistant(text) {
-        const wrapper = document.createElement("div");
-        wrapper.className = "bubble-assistant";
-        wrapper.style.whiteSpace = "pre-wrap";
-        wrapper.textContent = text;
-        chat.appendChild(wrapper);
-        chat.scrollTop = chat.scrollHeight;
-        return wrapper;
-      }
-
-      // Generic chip renderer used by multiple handlers (kept for starter chips / small sets)
-      function renderChips(
-        items = [],
-        onClickFn = null,
-        labelKey = "text",
-        showPrice = true
-      ) {
-        if (!Array.isArray(items) || items.length === 0) return;
-        const row = document.createElement("div");
-        row.className = "chip-row";
-
-        items.forEach((c) => {
-          const chip = document.createElement("div");
-          chip.className = "chip";
-
-          // Items may be "chip" objects or build objects — try to be flexible
-          const text =
-            typeof c === "string"
-              ? c
-              : c[labelKey] ||
-                (c.meta && c.meta.name) ||
-                c.text ||
-                c.id ||
-                c.name ||
-                "Unknown";
-
-          const priceVal =
-            c && (c.price || (c.meta && c.meta.price))
-              ? c.price || c.meta.price
-              : "";
-          const price = priceVal ? ` — ${priceVal}` : "";
-
-          chip.textContent = showPrice ? `${text}${price}` : text;
-
-          // attach id if present for lookupChip (dataset is easiest to pick up)
-          if (c && c.id) chip.dataset.chipid = c.id;
-
-          chip.addEventListener("click", (ev) => {
-            try {
-              if (typeof onClickFn === "function") return onClickFn(c, ev);
-
-              // default behaviour: if chip has id -> lookupChip
-              const explicitId = c && (c.id || chip.dataset.chipid);
-              if (explicitId) return lookupChip(explicitId);
-
-              // if chip is a build-like object and contains encoded build payload, try triggering onBuildTap
-              if (c && chip.dataset && chip.dataset.build)
-                return onBuildTap(chip);
-
-              // fallback: if object contains meta.name + type, try lookup by constructed id
-              if (c && c.meta && c.meta.name && c.type) {
-                const id = `${c.type}:${(c.meta.name || "")
-                  .toLowerCase()
-                  .replace(/\s+/g, "-")}`;
-                return lookupChip(id);
-              }
-
-              // last resort: try constructing from text + type
-              if (c && c.type && text) {
-                const id = `${c.type}:${text
-                  .toLowerCase()
-                  .replace(/\s+/g, "-")}`;
-                return lookupChip(id);
-              }
-            } catch (err) {
-              console.error("Chip click handler error:", err);
-            }
-          });
-
-          row.appendChild(chip);
-        });
-
-        chat.appendChild(row);
-        chat.scrollTop = chat.scrollHeight;
-      }
-
-      // 💸 BUILD RECOMMENDATIONS (Tapable)
-      function renderBuildRecommendations(results, maxBuilds = 3) {
-        appendAssistant(`Here are some recommended builds you can explore:`);
-
-        const row = document.createElement("div");
-        row.className = "chip-row";
-
-        results.slice(0, maxBuilds).forEach((build, idx) => {
-          const chip = document.createElement("div");
-          chip.className = "chip";
-
-          // Use only total_price as canonical price (avoid watt numbers)
-          const price = build.total_price || null;
-          const priceLabel = price ? ` — ${formatPrice(price)}` : "";
-          chip.textContent = `Build ${idx + 1}${priceLabel}`;
-
-          chip.dataset.build = encodeURIComponent(JSON.stringify(build));
-          chip.addEventListener("click", () => onBuildTap(chip));
-          row.appendChild(chip);
-        });
-
-        chat.appendChild(row);
-        chat.scrollTop = chat.scrollHeight;
-      }
-
-      // ⚙️ COMPATIBILITY RECOMMENDATIONS (Plain text — non-tapable)
-      // (Kept for fallback but not used in ask() by default.)
-      function renderCompatibility(data) {
-        if (data.results && data.results.length) {
-          // Friendly header
-          let out = `The ${data.target} is compatible with these ${(
-            data.compatible_type || "component"
-          ).toUpperCase()}s:\n\n`;
-
-          // Render up to a reasonable preview as plain-text list (no clickable chips)
-          data.results.slice(0, 12).forEach((c) => {
-            const price = c.price || (c.meta && c.meta.price) || "";
-            out += `- ${c.text}${price ? ` (${price})` : ""}\n`;
-          });
-
-          appendAssistant(out);
-        } else {
-          appendAssistant(data.message || "No compatible components found.");
+        if (!chat || !qInput || !sendBtn) {
+          console.error(
+            "ARIA frontend: missing required DOM elements (#chat, #query, #send)"
+          );
+          return;
         }
-      }
 
-      // 🧠 BUILD DETAILS (when user taps a build chip)
-      function onBuildTap(chip) {
-        try {
-          const bstr = decodeURIComponent(chip.dataset.build || "");
-          const build = JSON.parse(bstr);
-
-          const lines = [];
-
-          // --- Header (use total_price only)
-          const total = build.total_price || null;
-          const score = build.score ?? null;
-          if (total) {
-            const formattedTotal = `₱${Number(total).toLocaleString()}`;
-            lines.push(`Estimated total: ${formattedTotal}`);
-            lines.push(""); // blank line
+        // helper: safe scroll-to-bottom
+        function scrollChatToBottom() {
+          try {
+            chat.scrollTop = chat.scrollHeight;
+          } catch (e) {
+            /* ignore */
           }
+        }
 
-          // --- Component listing
-          const componentOrder = [
-            "cpu",
-            "gpu",
-            "motherboard",
-            "ram",
-            "storage",
-            "psu",
-          ];
-          const seen = new Set();
-          const formatLine = (label, name, price) =>
-            `${label}: ${name}${price ? ` — ${price}` : ""}`;
+        // 🧍 USER MESSAGE
+        function appendUser(text) {
+          const wrapper = document.createElement("div");
+          wrapper.style.alignSelf = "flex-end";
+          wrapper.style.background = "#d0f0e0";
+          wrapper.style.padding = "12px 16px";
+          wrapper.style.borderRadius = "12px";
+          wrapper.style.color = "#0a2026";
+          wrapper.style.fontWeight = "600";
+          wrapper.style.maxWidth = "80%";
+          wrapper.style.wordWrap = "break-word";
+          wrapper.textContent = text;
+          chat.appendChild(wrapper);
+          scrollChatToBottom();
+        }
 
-          if (Array.isArray(build.chips) && build.chips.length) {
-            // prefer chips.meta.name & meta.price when available
-            build.chips.forEach((c) => {
-              const type = (c.type || "").toLowerCase();
-              const name = c.meta?.name || c.text || "";
-              const price = c.meta?.price || c.price || "";
-              if (componentOrder.includes(type) && !seen.has(type)) {
-                const label = type.charAt(0).toUpperCase() + type.slice(1);
-                lines.push(formatLine(label, name, price));
-                seen.add(type);
+        // 🤖 ASSISTANT MESSAGE
+        function appendAssistant(text) {
+          const wrapper = document.createElement("div");
+          wrapper.className = "bubble-assistant";
+          wrapper.style.whiteSpace = "pre-wrap";
+          wrapper.textContent = text;
+          chat.appendChild(wrapper);
+          scrollChatToBottom();
+          return wrapper;
+        }
+
+        // Generic chip renderer used by multiple handlers
+        function renderChips(
+          items = [],
+          onClickFn = null,
+          labelKey = "text",
+          showPrice = true
+        ) {
+          if (!Array.isArray(items) || items.length === 0) return;
+          const row = document.createElement("div");
+          row.className = "chip-row";
+
+          items.forEach((c) => {
+            const chip = document.createElement("div");
+            chip.className = "chip";
+            chip.tabIndex = 0;
+            chip.style.cursor = "pointer";
+            chip.setAttribute("role", "button");
+
+            // Items may be "chip" objects or build objects — try to be flexible
+            const text =
+              typeof c === "string"
+                ? c
+                : c[labelKey] ||
+                  (c.meta && c.meta.name) ||
+                  c.text ||
+                  c.id ||
+                  c.name ||
+                  "Unknown";
+
+            const priceVal =
+              c && (c.price || (c.meta && c.meta.price))
+                ? c.price || c.meta.price
+                : "";
+            const price = priceVal ? ` — ${priceVal}` : "";
+
+            chip.textContent = showPrice ? `${text}${price}` : text;
+
+            // attach id if present for lookupChip (dataset is easiest to pick up)
+            if (c && c.id) chip.dataset.chipid = c.id;
+
+            // support encoded build payload that's used by renderBuildRecommendations
+            if (c && c.build_payload) chip.dataset.build = c.build_payload;
+
+            const activate = (ev) => {
+              try {
+                if (typeof onClickFn === "function") {
+                  const maybe = onClickFn(c, ev);
+                  if (maybe !== false) return;
+                }
+
+                const explicitId = c && (c.id || chip.dataset.chipid);
+                if (explicitId) return lookupChip(explicitId);
+
+                if (chip.dataset && chip.dataset.build) return onBuildTap(chip);
+
+                if (c && c.meta && c.meta.name && c.type) {
+                  const id = `${c.type}:${(c.meta.name || "")
+                    .toLowerCase()
+                    .replace(/\s+/g, "-")}`;
+                  return lookupChip(id);
+                }
+
+                if (c && c.type && text) {
+                  const id = `${c.type}:${text
+                    .toLowerCase()
+                    .replace(/\s+/g, "-")}`;
+                  return lookupChip(id);
+                }
+              } catch (err) {
+                console.error("Chip click handler error:", err);
+              }
+            };
+
+            chip.addEventListener("click", activate);
+            chip.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                activate(e);
               }
             });
-          } else {
-            // fallback: try build fields
-            componentOrder.forEach((k) => {
-              const item = build[k];
-              if (item && (item.name || item.text)) {
-                const name = item.name || item.text;
-                const price = item.price || "";
-                lines.push(formatLine(k.toUpperCase(), name, price));
+
+            row.appendChild(chip);
+          });
+
+          chat.appendChild(row);
+          scrollChatToBottom();
+        }
+
+        // 💸 BUILD RECOMMENDATIONS (Tapable)
+        function renderBuildRecommendations(results, maxBuilds = 3) {
+          appendAssistant("Here are some recommended builds you can explore:");
+
+          const row = document.createElement("div");
+          row.className = "chip-row";
+
+          results.slice(0, maxBuilds).forEach((build, idx) => {
+            const chip = document.createElement("div");
+            chip.className = "chip";
+            chip.tabIndex = 0;
+            chip.style.cursor = "pointer";
+            chip.setAttribute("role", "button");
+
+            const price = build.total_price || null;
+            const priceLabel = price ? ` — ${formatPrice(price)}` : "";
+            chip.textContent = `Build ${idx + 1}${priceLabel}`;
+
+            chip.dataset.build = encodeURIComponent(JSON.stringify(build));
+            chip.addEventListener("click", () => onBuildTap(chip));
+            chip.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onBuildTap(chip);
               }
             });
-          }
+            row.appendChild(chip);
+          });
 
-          lines.push(""); // spacing
+          chat.appendChild(row);
+          scrollChatToBottom();
+        }
 
-          // --- Wattage and Recommendation
-          const wattChip = (build.chips || []).find((c) =>
-            (c.id || "").startsWith("build-watt:")
-          );
-          const recoChip = (build.chips || []).find(
-            (c) =>
-              (c.type || "") === "psu-recommendation" ||
-              (c.id || "").startsWith("build-psu-reco:")
-          );
+        // 🧠 BUILD DETAILS (when user taps a build chip)
+        function onBuildTap(chip) {
+          try {
+            const bstr = decodeURIComponent(chip.dataset.build || "");
+            const build = JSON.parse(bstr);
 
-          if (wattChip) {
-            const meta = wattChip.meta || {};
-            const draw = meta.total_draw || wattChip.text || "";
-            lines.push(`Estimated Draw: ${draw} W`);
-          }
+            const lines = [];
 
-          if (recoChip) {
-            const meta = recoChip.meta || {};
-            const reco = meta.recommended_watt || recoChip.text || "";
-            lines.push(`Recommended PSU: ${reco} W`);
-          }
+            const total = build.total_price || null;
+            if (total) {
+              const formattedTotal = `₱${Number(total).toLocaleString()}`;
+              lines.push(`Estimated total: ${formattedTotal}`);
+              lines.push("");
+            }
 
-          // --- Suggested PSUs (deduped)
-          const psuChips = (build.chips || []).filter(
-            (c) => (c.type || "").toLowerCase() === "psu"
-          );
-          const uniquePSUs = [];
-          const seenNames = new Set();
+            const componentOrder = [
+              "cpu",
+              "gpu",
+              "motherboard",
+              "ram",
+              "storage",
+              "psu",
+            ];
+            const seen = new Set();
+            const formatLine = (label, name, price) =>
+              `${label}: ${name}${price ? ` — ${price}` : ""}`;
 
-          psuChips.forEach((p) => {
-            const name = p.meta?.name || p.text || "";
-            if (!seenNames.has(name)) {
-              seenNames.add(name);
-              uniquePSUs.push({
-                name,
-                price: p.meta?.price || p.price || "",
+            if (Array.isArray(build.chips) && build.chips.length) {
+              build.chips.forEach((c) => {
+                const type = (c.type || "").toLowerCase();
+                const name = c.meta?.name || c.text || "";
+                const price = c.meta?.price || c.price || "";
+                if (componentOrder.includes(type) && !seen.has(type)) {
+                  const label = type.charAt(0).toUpperCase() + type.slice(1);
+                  lines.push(formatLine(label, name, price));
+                  seen.add(type);
+                }
+              });
+            } else {
+              componentOrder.forEach((k) => {
+                const item = build[k];
+                if (item && (item.name || item.text)) {
+                  const name = item.name || item.text;
+                  const price = item.price || "";
+                  lines.push(formatLine(k.toUpperCase(), name, price));
+                }
               });
             }
-          });
 
-          if (uniquePSUs.length) {
             lines.push("");
-            lines.push("Suggested PSUs:");
-            uniquePSUs.forEach((p) => {
-              lines.push(`• ${p.name}${p.price ? ` — ${p.price}` : ""}`);
+
+            const wattChip = (build.chips || []).find((c) =>
+              (c.id || "").startsWith("build-watt:")
+            );
+            const recoChip = (build.chips || []).find(
+              (c) =>
+                (c.type || "") === "psu-recommendation" ||
+                (c.id || "").startsWith("build-psu-reco:")
+            );
+
+            if (wattChip) {
+              const meta = wattChip.meta || {};
+              const draw = meta.total_draw || wattChip.text || "";
+              lines.push(`Estimated Draw: ${draw} W`);
+            }
+
+            if (recoChip) {
+              const meta = recoChip.meta || {};
+              const reco = meta.recommended_watt || recoChip.text || "";
+              lines.push(`Recommended PSU: ${reco} W`);
+            }
+
+            const psuChips = (build.chips || []).filter(
+              (c) => (c.type || "").toLowerCase() === "psu"
+            );
+            const uniquePSUs = [];
+            const seenNames = new Set();
+
+            psuChips.forEach((p) => {
+              const name = p.meta?.name || p.text || "";
+              if (!seenNames.has(name)) {
+                seenNames.add(name);
+                uniquePSUs.push({
+                  name,
+                  price: p.meta?.price || p.price || "",
+                });
+              }
             });
+
+            if (uniquePSUs.length) {
+              lines.push("");
+              lines.push("Suggested PSUs:");
+              uniquePSUs.forEach((p) => {
+                lines.push(`• ${p.name}${p.price ? ` — ${p.price}` : ""}`);
+              });
+            }
+
+            appendAssistant(lines.join("\n"));
+          } catch (err) {
+            console.error("Failed to render build:", err);
+            appendAssistant("⚠️ Could not render build details properly.");
           }
-
-          appendAssistant(lines.join("\n"));
-        } catch (err) {
-          console.error("Failed to render build:", err);
-          appendAssistant("⚠️ Could not render build details properly.");
         }
-      }
 
-      // 💰 Price formatter
-      function formatPrice(p) {
-        if (p === null || p === undefined || p === "") return "";
-        // keep strings that already have currency symbol
-        if (typeof p === "string") {
-          const trimmed = p.trim();
-          if (trimmed.startsWith("₱")) return trimmed;
-          // try to extract digits and format
-          const digits = trimmed.replace(/[^\d]/g, "");
-          if (digits) return `₱${Number(digits).toLocaleString()}`;
-          return trimmed;
+        // 💰 Price formatter
+        function formatPrice(p) {
+          if (p === null || p === undefined || p === "") return "";
+          if (typeof p === "string") {
+            const trimmed = p.trim();
+            if (trimmed.startsWith("₱")) return trimmed;
+            const digits = trimmed.replace(/[^\d]/g, "");
+            if (digits) return `₱${Number(digits).toLocaleString()}`;
+            return trimmed;
+          }
+          return `₱${Number(p).toLocaleString()}`;
         }
-        return `₱${Number(p).toLocaleString()}`;
-      }
 
-      // 🔍 COMPONENT LOOKUP (when user taps a chip)
-      async function lookupChip(chipId) {
-        appendAssistant("🔍 Checking details...");
-        try {
-          const res = await fetch(API_BASE + "/api/lookup", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chip_id: chipId }),
+        // 🔍 COMPONENT LOOKUP (when user taps a chip)
+        async function lookupChip(chipId) {
+          appendAssistant("🔍 Checking details...");
+          try {
+            const res = await fetch(API_BASE + "/api/lookup", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chip_id: chipId }),
+            });
+
+            const text = await res.text();
+
+            if (!res.ok) {
+              appendAssistant(
+                `⚠️ Lookup failed (status ${res.status})\n\n${text}`
+              );
+              console.error("Lookup failed:", res.status, text);
+              return;
+            }
+
+            let data;
+            try {
+              data = text ? JSON.parse(text) : {};
+            } catch (err) {
+              appendAssistant("⚠️ Lookup returned non-JSON. See console.");
+              console.error("Failed to parse lookup JSON:", err, "raw:", text);
+              appendAssistant(text);
+              return;
+            }
+
+            const last = chat.querySelectorAll(".bubble-assistant");
+            if (last.length) last[last.length - 1].remove();
+
+            if (data.found) {
+              let specs = "";
+              for (const [key, val] of Object.entries(data.specs || {})) {
+                specs += `${key}: ${val}\n`;
+              }
+              appendAssistant(
+                `${data.name}\nPrice: ${data.price || "N/A"}\n${specs}`
+              );
+            } else {
+              appendAssistant(data.error || "Component not found.");
+            }
+          } catch (err) {
+            console.error(err);
+            appendAssistant("Lookup failed (network).");
+          }
+        }
+
+        // Starter suggestions (beginner-friendly tapables)
+        function showStarterSuggestions() {
+          appendAssistant("Welcome to ARIA");
+
+          const starters = [
+            "Recommend me a ₱30000 PC build",
+            "What CPU is compatible with RAMSTA RS-B450MP?",
+            "Show me the specs of RTX 3060",
+            "What does VRAM do?",
+          ];
+
+          const row = document.createElement("div");
+          row.className = "chip-row";
+
+          starters.forEach((text) => {
+            const chip = document.createElement("div");
+            chip.className = "chip";
+            chip.tabIndex = 0;
+            chip.setAttribute("role", "button");
+            chip.textContent = text;
+            chip.onclick = () => {
+              qInput.value = text;
+              setTimeout(() => ask(), 100);
+            };
+            chip.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                qInput.value = text;
+                setTimeout(() => ask(), 100);
+              }
+            });
+            row.appendChild(chip);
           });
 
-          const text = await res.text();
-          if (!res.ok) {
-            appendAssistant(
-              `⚠️ Lookup failed (status ${res.status})\n\n${text}`
-            );
-            console.error("Lookup failed:", res.status, text);
-            return;
-          }
-
-          let data;
-          try {
-            data = text ? JSON.parse(text) : {};
-          } catch (err) {
-            appendAssistant("⚠️ Lookup returned non-JSON. See console.");
-            console.error("Failed to parse lookup JSON:", err, "raw:", text);
-            appendAssistant(text);
-            return;
-          }
-
-          // remove the temporary "Checking details..." bubble
-          const last = chat.querySelectorAll(".bubble-assistant");
-          if (last.length) last[last.length - 1].remove();
-
-          if (data.found) {
-            let specs = "";
-            for (const [key, val] of Object.entries(data.specs || {})) {
-              specs += `${key}: ${val}\n`;
-            }
-            appendAssistant(`${data.name}\nPrice: ${data.price}\n${specs}`);
-          } else {
-            appendAssistant("Component not found.");
-          }
-        } catch (err) {
-          console.error(err);
-          appendAssistant("Lookup failed (network).");
+          chat.appendChild(row);
+          scrollChatToBottom();
         }
-      }
 
-      // Starter suggestions (beginner-friendly tapables)
-      function showStarterSuggestions() {
-        appendAssistant("Welcome to ARIA");
+        // Prevent multiple concurrent requests
+        let isRequestInFlight = false;
 
-        const starters = [
-          "Recommend me a ₱30000 PC build",
-          "What CPU is compatible with RAMSTA RS-B450MP?",
-          "Show me the specs of RTX 3060",
-          "What does VRAM do?",
-        ];
+        // 🚀 MAIN — Send query to backend
+        async function ask() {
+          const query = qInput.value.trim();
+          if (!query) return;
+          if (isRequestInFlight) {
+            return;
+          }
+          isRequestInFlight = true;
+          sendBtn.disabled = true;
+          qInput.disabled = true;
 
-        const row = document.createElement("div");
-        row.className = "chip-row";
+          appendUser(query);
+          const thinking = appendAssistant("ARIA Thinking...");
 
-        starters.forEach((text) => {
-          const chip = document.createElement("div");
-          chip.className = "chip";
-          chip.textContent = text;
-          chip.onclick = () => {
-            qInput.value = text;
-            setTimeout(() => ask(), 100);
-          };
-          row.appendChild(chip);
+          try {
+            const res = await fetch(API_BASE + "/api/recommend", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ query }),
+            });
+
+            const text = await res.text();
+
+            if (thinking && thinking.parentNode) thinking.remove();
+
+            if (!res.ok) {
+              appendAssistant(`⚠️ Server error ${res.status}\n\n${text}`);
+              console.error("Server returned non-OK:", res.status, text);
+              qInput.value = "";
+              return;
+            }
+
+            let data = null;
+            try {
+              data = text ? JSON.parse(text) : {};
+            } catch (err) {
+              appendAssistant(
+                "⚠️ Failed to parse server response as JSON. Showing raw response:"
+              );
+              console.error(
+                "Failed to parse JSON from server response:",
+                err,
+                "raw:",
+                text
+              );
+              appendAssistant(text);
+              qInput.value = "";
+              return;
+            }
+
+            // 🧩 Handle responses by source - FIXED COMPATIBILITY FORMAT
+            if (data.source === "local-compatibility") {
+              const verdict = data.verdict || "unknown";
+              const emoji = data.emoji_verdict || "🔍";
+              const reason = data.reason || "";
+              const target = data.target || "component";
+
+              // Build clean compatibility message - FIXED FORMAT
+              let compatMessage = `${emoji} COMPATIBILITY: ${verdict.toUpperCase()}\n\n`;
+              compatMessage += `Component: ${target}\n\n`;
+
+              if (reason) {
+                compatMessage += `Technical Check: ${reason}\n\n`;
+              }
+
+              appendAssistant(compatMessage);
+
+              // Show compatible options - FIXED: Only show chips if we have them
+              const hasResults =
+                Array.isArray(data.results) && data.results.length > 0;
+              const hasChips =
+                Array.isArray(data.chips) && data.chips.length > 0;
+
+              if (hasResults || hasChips) {
+                const optionsToShow = hasResults ? data.results : data.chips;
+                appendAssistant("✅ Compatible Options:");
+                renderChips(
+                  optionsToShow.slice(0, 8),
+                  (c) => {
+                    const id =
+                      c.id ||
+                      (c.type && (c.meta?.name || c.text)
+                        ? `${c.type}:${(c.meta?.name || c.text)
+                            .toLowerCase()
+                            .replace(/\s+/g, "-")}`
+                        : null);
+                    if (id) return lookupChip(id);
+                  },
+                  "text",
+                  true
+                );
+              }
+
+              // If no results found
+              if (!hasResults && !hasChips) {
+                appendAssistant(
+                  data.message ||
+                    "❌ No compatible components found. Please check specifications manually."
+                );
+              }
+            } else if (data.source === "local-psu") {
+              let textOut = `🔌 PSU Recommendation\n`;
+              textOut += `Detected: ${
+                data.detected_str || "components unknown"
+              }\n\n`;
+              if (data.component_watts) {
+                for (const [k, v] of Object.entries(data.component_watts)) {
+                  textOut += `  ${k}: ${v} W\n`;
+                }
+                textOut += `\n`;
+              }
+              textOut += `Estimated total draw: ${data.total_draw} W\n`;
+              textOut += `Recommended PSU (with headroom): ${data.recommended_psu} W\n\n`;
+
+              if (
+                Array.isArray(data.suggested_psu_chips) &&
+                data.suggested_psu_chips.length
+              ) {
+                textOut += "Suggested PSUs:\n";
+                data.suggested_psu_chips.forEach((chip) => {
+                  const label =
+                    chip.text || (chip.meta && chip.meta.name) || "PSU";
+                  const price =
+                    chip.price || (chip.meta && chip.meta.price) || "";
+                  textOut += ` • ${label}${price ? ` — ${price}` : ""}\n`;
+                });
+                textOut += `\n(To inspect a PSU in detail, ask "show me specs of <PSU name>".)`;
+              }
+
+              appendAssistant(textOut);
+            } else if (
+              data.source === "local-recommendation" &&
+              Array.isArray(data.results)
+            ) {
+              const normalized = data.results.map((r) => ({
+                message: r.message || "",
+                chips: r.chips || [],
+                total_price: r.total_price || null,
+                score: r.score || null,
+                _orig: r,
+              }));
+              renderBuildRecommendations(normalized, 3);
+            } else if (data.source === "local-list") {
+              if (data.text) {
+                appendAssistant(data.text);
+              } else if (
+                Array.isArray(data.results) &&
+                data.results.length &&
+                data.results.length <= 8
+              ) {
+                renderChips(
+                  data.results,
+                  (c) => {
+                    const id = c.id || null;
+                    if (id) lookupChip(id);
+                  },
+                  "text",
+                  true
+                );
+              } else {
+                appendAssistant("No items found.");
+              }
+            } else if (data.text) {
+              appendAssistant(data.text);
+
+              if (
+                Array.isArray(data.results) &&
+                data.results.length &&
+                data.results.length <= 8
+              ) {
+                renderChips(
+                  data.results,
+                  (c) => {
+                    const id =
+                      c.id ||
+                      (c.type && (c.meta?.name || c.text)
+                        ? `${c.type}:${(c.meta?.name || c.text)
+                            .toLowerCase()
+                            .replace(/\s+/g, "-")}`
+                        : null);
+                    if (id) lookupChip(id);
+                  },
+                  "text",
+                  true
+                );
+              }
+
+              if (
+                Array.isArray(data.chips) &&
+                data.chips.length &&
+                data.chips.length <= 8
+              ) {
+                renderChips(
+                  data.chips,
+                  (c) => {
+                    if (c.id) lookupChip(c.id);
+                  },
+                  "text",
+                  true
+                );
+              }
+            } else {
+              appendAssistant("No recommendations found. Server returned:");
+              appendAssistant(JSON.stringify(data, null, 2));
+            }
+          } catch (err) {
+            console.error("Network/fetch error:", err);
+            appendAssistant(
+              "⚠️ Connection error. Check Flask server. (See console for details)"
+            );
+          } finally {
+            isRequestInFlight = false;
+            sendBtn.disabled = false;
+            qInput.disabled = false;
+            qInput.value = "";
+            qInput.focus();
+          }
+        }
+
+        // ⌨️ UI wiring
+        sendBtn.addEventListener("click", ask);
+        qInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            ask();
+          }
         });
 
-        chat.appendChild(row);
-        chat.scrollTop = chat.scrollHeight;
-      }
-
-      // 🚀 MAIN — Send query to backend (robust, shows server body for debugging)
-      async function ask() {
-        const query = qInput.value.trim();
-        if (!query) return;
-
-        appendUser(query);
-        const thinking = appendAssistant("ARIA Thinking...");
-
-        try {
-          const res = await fetch(API_BASE + "/api/recommend", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query }),
-          });
-
-          // Read raw text first so we can show helpful debug info if parsing fails
-          const text = await res.text();
-
-          // remove thinking bubble
-          if (thinking && thinking.parentNode) thinking.remove();
-
-          if (!res.ok) {
-            appendAssistant(`⚠️ Server error ${res.status}\n\n${text}`);
-            console.error("Server returned non-OK:", res.status, text);
-            qInput.value = "";
-            return;
-          }
-
-          let data = null;
-          try {
-            data = text ? JSON.parse(text) : {};
-          } catch (err) {
-            appendAssistant(
-              "⚠️ Failed to parse server response as JSON. Showing raw response:"
-            );
-            console.error(
-              "Failed to parse JSON from server response:",
-              err,
-              "raw:",
-              text
-            );
-            appendAssistant(text);
-            qInput.value = "";
-            return;
-          }
-
-          // 🧩 Handle compatibility (render TAPABLE chips)
-          if (data.source === "local-compatibility") {
-            if (Array.isArray(data.results) && data.results.length) {
-              // Header message
-              appendAssistant(
-                `The ${data.target} is compatible with these ${(
-                  data.compatible_type || "component"
-                ).toUpperCase()} options — tap any item to view specs:`
-              );
-
-              // Limit displayed chips to a reasonable number to avoid UI overload
-              const chipsToShow = data.results.slice(0, 12);
-
-              // Render tapable chips; clicking looks up the chip id (falling back to constructed id)
-              renderChips(
-                chipsToShow,
-                (c) => {
-                  // prefer explicit id
-                  const id =
-                    c.id ||
-                    (c.type && (c.meta?.name || c.text)
-                      ? `${c.type}:${(c.meta?.name || c.text)
-                          .toLowerCase()
-                          .replace(/\s+/g, "-")}`
-                      : null);
-                  if (id) return lookupChip(id);
-                },
-                "text",
-                true
-              );
-
-              // short reminder
-            } else {
-              // fallback message
-              appendAssistant(
-                data.message || "No compatible components found."
-              );
-            }
-          }
-          // ⚡ Handle PSU responses (plain text)
-          else if (data.source === "local-psu") {
-            let textOut = `🔌 PSU Recommendation\n`;
-            textOut += `Detected: ${
-              data.detected_str || "components unknown"
-            }\n\n`;
-            // show per-component watts if present
-            if (data.component_watts) {
-              for (const [k, v] of Object.entries(data.component_watts)) {
-                textOut += `  ${k}: ${v} W\n`;
-              }
-              textOut += `\n`;
-            }
-            textOut += `Estimated total draw: ${data.total_draw} W\n`;
-            textOut += `Recommended PSU (with headroom): ${data.recommended_psu} W\n\n`;
-
-            // Suggested PSUs as plain text bullets (no clickable chips)
-            if (
-              Array.isArray(data.suggested_psu_chips) &&
-              data.suggested_psu_chips.length
-            ) {
-              textOut += "Suggested PSUs:\n";
-              data.suggested_psu_chips.forEach((chip) => {
-                const label =
-                  chip.text || (chip.meta && chip.meta.name) || "PSU";
-                const price =
-                  chip.price || (chip.meta && chip.meta.price) || "";
-                textOut += ` • ${label}${price ? ` — ${price}` : ""}\n`;
-              });
-              textOut += `\n(To inspect a PSU in detail, ask "show me specs of <PSU name>".)`;
-            }
-
-            appendAssistant(textOut);
-          }
-          // 💸 Handle budget builds (only show Build chips, do NOT auto-render every component as chips)
-          else if (
-            data.source === "local-recommendation" &&
-            Array.isArray(data.results)
-          ) {
-            // render build buttons only
-            const normalized = data.results.map((r) => ({
-              message: r.message || "",
-              chips: r.chips || [],
-              total_price: r.total_price || null,
-              score: r.score || null,
-              // keep original r for potential future use
-              _orig: r,
-            }));
-            renderBuildRecommendations(normalized, 3);
-
-            // Do NOT automatically render per-build component chips here.
-            // Build detail rendering happens when user taps a Build chip (onBuildTap).
-          }
-          // Handle local-list responses (server already composes plain text lists when dataset is large)
-          else if (data.source === "local-list") {
-            // Prefer backend-friendly plain text in data.text; fallback to small chips if explicitly provided and small
-            if (data.text) {
-              appendAssistant(data.text);
-            } else if (
-              Array.isArray(data.results) &&
-              data.results.length &&
-              data.results.length <= 8
-            ) {
-              // small sets can be rendered as chips (optional)
-              renderChips(
-                data.results,
-                (c) => {
-                  const id = c.id || null;
-                  if (id) lookupChip(id);
-                },
-                "text",
-                true
-              );
-            } else {
-              appendAssistant("No items found.");
-            }
-          }
-          // 🤖 Handle Gemini text answers and render any small attached chips (only if intentionally included)
-          else if (data.text) {
-            appendAssistant(data.text);
-
-            // Render chips only when backend intentionally returned a small 'results' set
-            if (
-              Array.isArray(data.results) &&
-              data.results.length &&
-              data.results.length <= 8
-            ) {
-              renderChips(
-                data.results,
-                (c) => {
-                  const id =
-                    c.id ||
-                    (c.type && (c.meta?.name || c.text)
-                      ? `${c.type}:${(c.meta?.name || c.text)
-                          .toLowerCase()
-                          .replace(/\s+/g, "-")}`
-                      : null);
-                  if (id) lookupChip(id);
-                },
-                "text",
-                true
-              );
-            }
-
-            if (
-              Array.isArray(data.chips) &&
-              data.chips.length &&
-              data.chips.length <= 8
-            ) {
-              renderChips(
-                data.chips,
-                (c) => {
-                  if (c.id) lookupChip(c.id);
-                },
-                "text",
-                true
-              );
-            }
-
-            // suggested_psu_chips intentionally ignored for clickable rendering here (PSU handling above shows plain list)
-          } else {
-            appendAssistant("No recommendations found. Server returned:");
-            appendAssistant(JSON.stringify(data, null, 2));
-          }
-        } catch (err) {
-          console.error("Network/fetch error:", err);
-          if (thinking && thinking.parentNode) thinking.remove();
-          appendAssistant(
-            "⚠️ Connection error. Check Flask server. (See console for details)"
-          );
-        } finally {
-          qInput.value = "";
-        }
-      }
-
-      // ⌨️ UI wiring
-      sendBtn.onclick = ask;
-      qInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") ask();
-      });
-
-      // show starter suggestions when page loads
-      window.addEventListener("load", showStarterSuggestions);
+        // show starter suggestions when page loads
+        window.addEventListener("load", showStarterSuggestions);
+      })();
     </script>
     <div
       id="output"

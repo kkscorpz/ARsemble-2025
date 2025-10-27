@@ -1,200 +1,255 @@
-# server.py — Unified ARsemble AI server (UI + API)
-# Replaces previous versions. Adds streaming JSON-lines endpoint /api/ai/stream and gzip compression.
-# Static routes moved to the bottom so API routes are matched first (avoids 404/405 on /api/*).
-
-from flask import Flask, request, jsonify, send_from_directory, abort, Response, stream_with_context
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-from waitress import serve
 import os
-import logging
-import traceback
 import json
-import threading
-from flask_compress import Compress
+import logging
+from typing import Dict, Any, List
 
-# Import AI functions (must exist)
-from arsemble_ai import get_ai_response, get_component_details, list_shops
-import arsemble_ai as arsemble_ai_mod
+# Import your existing backend functions
+from arsemble_ai import (
+    get_ai_response,
+    get_component_details,
+    budget_builds,
+    get_compatible_components,
+    gemini_fallback_with_data,
+    make_public_data,
+    data  # your components dataset
+)
 
-# Environment: prefer standard PORT env var (Render), fallback to ARSEMBLE_PORT then 10000
-HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", os.getenv("ARSSEMBLE_PORT", "10000")))
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s: %(message)s")
-logger = logging.getLogger("ARsemble")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ARsemble-Server")
 
-app = Flask(__name__, static_folder="static", static_url_path="")
-# allow all origins for API routes (change to specific origin in production)
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
-# enable gzip compression for dynamic responses
-Compress(app)
-
-
-# Unified AI endpoint (POST only for queries that change state or supply body)
-@app.route("/api/recommend", methods=["POST", "GET"])
-def recommend_api():
-    if request.method == "GET":
-        return jsonify({
-            "info": "POST JSON {'query':'.'} to this endpoint",
-            "example": {"query": "Recommend me a ₱30000 PC build"}
-        })
-    try:
-        body = request.get_json(force=True) or {}
-        query = (body.get("query") or "").strip()
-        if not query:
-            return jsonify({"error": "Missing 'query' in request"}), 400
-
-        logger.info("AI query: %s", query)
-        result = get_ai_response(query)
-
-        if isinstance(result, dict):
-            return jsonify(result)
-        else:
-            return jsonify({"source": "local", "text": str(result)})
-    except Exception as e:
-        logger.exception("Error in /api/recommend")
-        return jsonify({
-            "error": "server error in /api/recommend",
-            "detail": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+# ==================== ROUTES ====================
 
 
-# Streaming endpoint: streams JSON-lines as chunks become available
-@app.route("/api/ai/stream", methods=["POST", "GET"])
-def ai_stream():
-    """
-    POST JSON {"prompt":"..."} to stream incremental results.
-    GET will return a short usage message.
-    """
-    if request.method == "GET":
-        return jsonify({
-            "info": "POST JSON {'prompt':'...'} to this endpoint to receive streaming JSON-lines"
-        })
-
-    try:
-        body = request.get_json(force=True) or {}
-    except Exception:
-        return jsonify({"error": "invalid json body"}), 400
-
-    prompt = (body.get("prompt") or "").strip()
-    if not prompt:
-        return jsonify({"error": "missing 'prompt' in body"}), 400
-
-    def gen():
-        try:
-            # If arsemble_ai_mod provides a stream_response generator, prefer it
-            if hasattr(arsemble_ai_mod, "stream_response"):
-                for item in arsemble_ai_mod.stream_response(prompt):
-                    if isinstance(item, bytes):
-                        yield item + b"\n"
-                    elif isinstance(item, str):
-                        yield (item + "\n").encode("utf-8")
-                    else:
-                        yield (json.dumps(item) + "\n").encode("utf-8")
-                return
-
-            # Fallback: blocking get_ai_response, run in thread and stream slices
-            if hasattr(arsemble_ai_mod, "get_ai_response"):
-                result_container = {"result": None, "exc": None}
-
-                def _runner():
-                    try:
-                        result_container["result"] = arsemble_ai_mod.get_ai_response(
-                            prompt)
-                    except Exception as e:
-                        result_container["exc"] = e
-
-                t = threading.Thread(target=_runner)
-                t.start()
-                t.join()
-                if result_container["exc"]:
-                    raise result_container["exc"]
-                result = result_container["result"]
-            else:
-                result = None
-
-            if result is None:
-                yield (json.dumps({"error": "no_result"}) + "\n").encode("utf-8")
-                return
-
-            if isinstance(result, dict):
-                yield (json.dumps(result) + "\n").encode("utf-8")
-                return
-
-            text = str(result)
-            chunk_size = 256
-            for i in range(0, len(text), chunk_size):
-                part = text[i: i + chunk_size]
-                yield (json.dumps({"chunk": i // chunk_size, "text": part}) + "\n").encode("utf-8")
-        except Exception as e:
-            try:
-                yield (json.dumps({"error": "server_error", "msg": str(e)}) + "\n").encode("utf-8")
-            except Exception:
-                pass
-
-    return Response(stream_with_context(gen()), mimetype="application/json")
-
-
-# Lookup endpoint: support POST (JSON) and GET (?chip_id=...)
-@app.route("/api/lookup", methods=["POST", "GET"])
-def lookup_api():
-    try:
-        if request.method == "GET":
-            chip_id = request.args.get(
-                "chip_id") or request.args.get("id") or ""
-        else:
-            body = request.get_json(force=True) or {}
-            chip_id = (body.get("chip_id") or body.get("id") or "").strip()
-
-        if not chip_id:
-            return jsonify({"found": False, "error": "chip_id required (POST JSON or GET ?chip_id=)"}), 400
-
-        details = get_component_details(chip_id)
-        return jsonify(details)
-    except Exception as e:
-        logger.exception("server error in /api/lookup")
-        return jsonify({"error": "server error in /api/lookup", "detail": str(e)}), 500
-
-
-# Shops list (GET)
-@app.route("/api/shops", methods=["GET"])
-def get_shops():
-    try:
-        shops = list_shops(only_public=True)
-        return jsonify({"shops": shops})
-    except Exception as e:
-        logger.exception("server error in /api/shops")
-        return jsonify({"error": "server error in /api/shops", "detail": str(e)}), 500
-
-
-# Health
-@app.route("/api/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "message": "ARsemble AI running!"})
-
-
-# Serve index / static files (moved to bottom so API routes are matched first)
-@app.route("/", methods=["GET"])
+@app.route('/')
 def index():
+    """Serve the main UI"""
+    return render_template('index.html')
+
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    """Main chat endpoint - handles all AI responses"""
     try:
-        return send_from_directory(app.static_folder, "index.html")
-    except Exception:
-        abort(404)
+        data = request.get_json()
+        user_input = data.get('message', '').strip()
+
+        if not user_input:
+            return jsonify({'error': 'Empty message'}), 400
+
+        logger.info(f"Chat request: {user_input}")
+
+        # Get AI response using your unified handler
+        response = get_ai_response(user_input)
+
+        return jsonify(response)
+
+    except Exception as e:
+        logger.error(f"Chat error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 
-@app.route("/<path:filename>", methods=["GET"])
-def static_files(filename):
+@app.route('/api/components/details', methods=['POST'])
+def component_details():
+    """Get detailed component information"""
     try:
-        full = os.path.join(app.static_folder, filename)
-        if os.path.exists(full):
-            return send_from_directory(app.static_folder, filename)
-        abort(404)
-    except Exception:
-        abort(404)
+        data = request.get_json()
+        component_query = data.get('component', '').strip()
+
+        if not component_query:
+            return jsonify({'error': 'No component specified'}), 400
+
+        details = get_component_details(component_query)
+        return jsonify(details)
+
+    except Exception as e:
+        logger.error(f"Component details error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 
-if __name__ == "__main__":
-    logger.info(f"Starting ARsemble unified server on http://{HOST}:{PORT}")
-    serve(app, host=HOST, port=PORT)
+@app.route('/api/builds/budget', methods=['POST'])
+def budget_recommendations():
+    """Get budget build recommendations"""
+    try:
+        data = request.get_json()
+        budget = data.get('budget')
+        usage = data.get('usage', 'general')
+        top_n = data.get('top_n', 3)
+
+        if not budget:
+            return jsonify({'error': 'No budget specified'}), 400
+
+        builds = budget_builds(int(budget), usage, int(top_n))
+
+        # Format builds for response
+        formatted_builds = []
+        for i, build in enumerate(builds):
+            formatted_builds.append({
+                'id': f'build_{i+1}',
+                'total_price': build.get('total_price'),
+                'score': build.get('score'),
+                'components': {
+                    'cpu': build.get('cpu'),
+                    'gpu': build.get('gpu'),
+                    'motherboard': build.get('motherboard'),
+                    'ram': build.get('ram'),
+                    'storage': build.get('storage'),
+                    'psu': build.get('psu')
+                }
+            })
+
+        return jsonify({
+            'budget': budget,
+            'usage': usage,
+            'builds': formatted_builds
+        })
+
+    except Exception as e:
+        logger.error(f"Budget builds error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/api/components/compatible', methods=['POST'])
+def compatibility_check():
+    """Check component compatibility"""
+    try:
+        data = request.get_json()
+        query = data.get('query', '').strip()
+
+        if not query:
+            return jsonify({'error': 'No query specified'}), 400
+
+        compatibility = get_compatible_components(query, data)
+        return jsonify(compatibility)
+
+    except Exception as e:
+        logger.error(f"Compatibility check error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'ARsemble AI Backend',
+        'dataset_summary': {
+            'cpu_count': len(data.get('cpu', {})),
+            'gpu_count': len(data.get('gpu', {})),
+            'motherboard_count': len(data.get('motherboard', {})),
+            'ram_count': len(data.get('ram', {})),
+            'storage_count': len(data.get('storage', {})),
+            'psu_count': len(data.get('psu', {}))
+        }
+    })
+
+# ==================== ERROR HANDLERS ====================
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error'}), 500
+
+# ==================== MAIN ====================
+
+
+if __name__ == '__main__':
+    # Create templates directory if it doesn't exist
+    os.makedirs('templates', exist_ok=True)
+
+    # Create basic HTML template
+    with open('templates/index.html', 'w') as f:
+        f.write('''<!DOCTYPE html>
+<html>
+<head>
+    <title>ARsemble AI - PC Building Assistant</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .chat-container { max-width: 800px; margin: 0 auto; }
+        .message { margin: 10px 0; padding: 10px; border-radius: 5px; }
+        .user { background: #e3f2fd; text-align: right; }
+        .assistant { background: #f5f5f5; }
+        .chip { display: inline-block; background: #2196f3; color: white; padding: 5px 10px; margin: 2px; border-radius: 15px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <h1>ARsemble AI - PC Building Assistant</h1>
+        <div id="chat-messages"></div>
+        <input type="text" id="user-input" placeholder="Ask about PC components..." style="width: 70%; padding: 10px;">
+        <button onclick="sendMessage()">Send</button>
+    </div>
+
+    <script>
+        async function sendMessage() {
+            const input = document.getElementById('user-input');
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            // Add user message to chat
+            addMessage('user', message);
+            input.value = '';
+            
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                });
+                
+                const data = await response.json();
+                
+                if (data.chips) {
+                    // Display chips if available
+                    let chipHTML = data.chips.map(chip => 
+                        `<div class="chip" onclick="handleChipClick('${chip.id}')">${chip.text}</div>`
+                    ).join('');
+                    addMessage('assistant', data.text + '<br>' + chipHTML);
+                } else {
+                    addMessage('assistant', data.text);
+                }
+                
+            } catch (error) {
+                addMessage('assistant', 'Error: Could not get response');
+            }
+        }
+        
+        function addMessage(role, content) {
+            const messagesDiv = document.getElementById('chat-messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+            messageDiv.innerHTML = content;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
+        function handleChipClick(chipId) {
+            // Handle chip clicks - you can implement this based on your needs
+            alert('Chip clicked: ' + chipId);
+        }
+        
+        // Allow sending with Enter key
+        document.getElementById('user-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>''')
+
+    # Start the server
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('DEBUG', 'False').lower() == 'true'
+
+    logger.info(f"Starting ARIA AI Server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=debug)
