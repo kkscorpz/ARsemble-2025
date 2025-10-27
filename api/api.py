@@ -1,16 +1,21 @@
-# api/api.py — Pure API Service
+# api/api.py — Dedicated ARsemble API Service
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import logging
-import traceback
+import json
 
 # Import AI functions
-from arsemble_ai import get_ai_response, get_component_details, list_shops, budget_builds as get_budget_builds
+from arsemble_ai import (
+    get_ai_response,
+    get_component_details,
+    list_shops,
+    budget_builds as get_budget_builds
+)
 
 # Environment setup
-HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
-PORT = int(os.getenv("API_PORT", "10001"))  # Different port from main server
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
@@ -20,194 +25,323 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================
-# 🧠 /recommend (main AI)
+# 🧠 CORE AI ENDPOINTS
 # ============================
 
 
-@app.route("/recommend", methods=["POST", "GET"])
-def recommend_api():
-    if request.method == "GET":
-        return jsonify({
-            "service": "ARsemble AI API",
-            "endpoint": "/recommend",
-            "method": "POST",
-            "example": {"query": "Recommend me a ₱30000 PC build"}
-        })
-
+@app.route("/api/recommend", methods=["POST"])
+def recommend():
+    """Main AI recommendation endpoint"""
     try:
-        body = request.get_json(force=True) or {}
-        query = (body.get("query") or "").strip()
-        if not query:
-            return jsonify({"error": "Missing 'query' in request"}), 400
+        body = request.get_json() or {}
+        query = body.get("query", "").strip()
 
-        logger.info("AI query: %s", query)
+        if not query:
+            return jsonify({
+                "success": False,
+                "error": "Query parameter required"
+            }), 400
+
+        logger.info(f"API Query: {query}")
         result = get_ai_response(query)
 
-        if isinstance(result, dict):
-            return jsonify(result)
-        else:
-            return jsonify({"text": str(result)})
+        return jsonify({
+            "success": True,
+            "query": query,
+            "data": result
+        })
 
     except Exception as e:
-        logger.exception("Error in /recommend")
-        return jsonify({"error": "server error", "detail": str(e)}), 500
+        logger.error(f"Recommend error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Internal server error"
+        }), 500
 
-# ==========================
-# 🔍 /lookup
-# ==========================
 
-
-@app.route("/lookup", methods=["POST", "GET"])
-def lookup_api():
+@app.route("/api/lookup", methods=["GET", "POST"])
+def lookup():
+    """Lookup component details"""
     try:
         if request.method == "GET":
-            chip_id = request.args.get(
-                "chip_id") or request.args.get("id") or ""
+            component_id = request.args.get("id", "").strip()
         else:
-            body = request.get_json(force=True) or {}
-            chip_id = (body.get("chip_id") or body.get("id") or "").strip()
+            body = request.get_json() or {}
+            component_id = body.get("id", "").strip()
 
-        if not chip_id:
-            return jsonify({"error": "chip_id required"}), 400
+        if not component_id:
+            return jsonify({
+                "success": False,
+                "error": "Component ID required"
+            }), 400
 
-        details = get_component_details(chip_id)
-        return jsonify(details)
-
-    except Exception as e:
-        logger.exception("Error in /lookup")
-        return jsonify({"error": str(e)}), 500
-
-# ==========================
-# 🏬 /shops
-# ==========================
-
-
-@app.route("/shops", methods=["GET"])
-def get_shops():
-    try:
-        shops = list_shops(only_public=True)
-        return jsonify({"shops": shops})
-    except Exception as e:
-        logger.exception("Error in /shops")
-        return jsonify({"error": str(e)}), 500
-
-# ==========================
-# 💰 /budget-builds
-# ==========================
-
-
-@app.route("/budget-builds", methods=["POST"])
-def budget_builds():
-    try:
-        body = request.get_json(force=True) or {}
-        budget = body.get("budget")
-        usage = body.get("usage", "gaming")
-
-        if not budget:
-            return jsonify({"error": "Budget required"}), 400
-
-        builds = get_budget_builds(int(budget), usage)
+        details = get_component_details(component_id)
 
         return jsonify({
-            "budget": budget,
-            "usage": usage,
-            "builds": builds
+            "success": True,
+            "component_id": component_id,
+            "data": details
         })
 
     except Exception as e:
-        logger.exception("Error in /budget-builds")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Lookup error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Lookup failed"
+        }), 500
 
-# ==========================
-# 🔧 /compatibility
-# ==========================
+# ============================
+# 💰 BUDGET BUILDS
+# ============================
 
 
-@app.route("/compatibility", methods=["POST"])
-def check_compatibility():
+@app.route("/api/budget-builds", methods=["POST"])
+def budget_builds():
+    """Generate budget PC builds"""
     try:
-        body = request.get_json(force=True) or {}
-        component1 = body.get("component1")
-        component2 = body.get("component2")
+        body = request.get_json() or {}
+        budget = body.get("budget")
+        usage = body.get("usage", "gaming")
+        top_n = body.get("top_n", 3)
 
-        if not component1 or not component2:
-            return jsonify({"error": "Both component1 and component2 required"}), 400
+        if not budget:
+            return jsonify({
+                "success": False,
+                "error": "Budget parameter required"
+            }), 400
 
-        query = f"Are {component1} and {component2} compatible?"
-        result = get_ai_response(query)
+        builds = get_budget_builds(int(budget), usage, int(top_n))
 
-        return jsonify(result)
+        return jsonify({
+            "success": True,
+            "parameters": {
+                "budget": budget,
+                "usage": usage,
+                "top_n": top_n
+            },
+            "data": {
+                "builds": builds,
+                "count": len(builds)
+            }
+        })
 
     except Exception as e:
-        logger.exception("Error in /compatibility")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Budget builds error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Budget build generation failed"
+        }), 500
 
-# ==========================
-# 📊 /components
-# ==========================
+# ============================
+# 🔧 COMPONENTS
+# ============================
 
 
-@app.route("/components", methods=["GET"])
+@app.route("/api/components", methods=["GET"])
 def list_components():
+    """List all components by type"""
     try:
-        component_type = request.args.get("type", "").lower()
         from arsemble_ai import data
+
+        component_type = request.args.get("type", "").lower()
 
         if component_type and component_type in data:
             components = list(data[component_type].keys())
             return jsonify({
-                "type": component_type,
-                "components": components[:50]  # Limit results
+                "success": True,
+                "filters": {"type": component_type},
+                "data": {
+                    "components": components,
+                    "count": len(components)
+                }
             })
         else:
-            # Return all component types
             return jsonify({
-                "component_types": list(data.keys()),
-                "counts": {key: len(value) for key, value in data.items()}
+                "success": True,
+                "data": {
+                    "component_types": list(data.keys()),
+                    "counts": {key: len(value) for key, value in data.items()}
+                }
             })
 
     except Exception as e:
-        logger.exception("Error in /components")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Components error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to list components"
+        }), 500
 
-# ==========================
-# ❤️ Health & Root
-# ==========================
+
+@app.route("/api/components/search", methods=["GET"])
+def search_components():
+    """Search components"""
+    try:
+        query = request.args.get("q", "").strip()
+        component_type = request.args.get("type", "").lower()
+
+        if not query:
+            return jsonify({
+                "success": False,
+                "error": "Search query required"
+            }), 400
+
+        from arsemble_ai import data
+
+        results = []
+        search_types = [component_type] if component_type else data.keys()
+
+        for comp_type in search_types:
+            if comp_type in data:
+                for comp_name, comp_data in data[comp_type].items():
+                    if query.lower() in comp_name.lower():
+                        results.append({
+                            "name": comp_name,
+                            "type": comp_type,
+                            "data": comp_data
+                        })
+
+        return jsonify({
+            "success": True,
+            "search": {
+                "query": query,
+                "type_filter": component_type,
+                "results_count": len(results)
+            },
+            "data": {
+                "results": results[:20]
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Search error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Search failed"
+        }), 500
+
+# ============================
+# 🏬 SHOPS
+# ============================
+
+
+@app.route("/api/shops", methods=["GET"])
+def shops():
+    """Get PC part shops"""
+    try:
+        shops_list = list_shops(only_public=True)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "shops": shops_list,
+                "count": len(shops_list)
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Shops error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to fetch shops"
+        }), 500
+
+# ============================
+# 🔗 COMPATIBILITY
+# ============================
+
+
+@app.route("/api/compatibility", methods=["POST"])
+def compatibility():
+    """Check component compatibility"""
+    try:
+        body = request.get_json() or {}
+        component1 = body.get("component1")
+        component2 = body.get("component2")
+
+        if not component1 or not component2:
+            return jsonify({
+                "success": False,
+                "error": "Both component1 and component2 required"
+            }), 400
+
+        query = f"Check compatibility between {component1} and {component2}"
+        result = get_ai_response(query)
+
+        return jsonify({
+            "success": True,
+            "components": {
+                "component1": component1,
+                "component2": component2
+            },
+            "data": result
+        })
+
+    except Exception as e:
+        logger.error(f"Compatibility error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Compatibility check failed"
+        }), 500
+
+# ============================
+# 📊 HEALTH & INFO
+# ============================
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    """Health check"""
+    try:
+        from arsemble_ai import data
+
+        return jsonify({
+            "status": "healthy",
+            "service": "ARsemble API",
+            "version": "1.0.0",
+            "database": {
+                "component_types": len(data),
+                "total_components": sum(len(components) for components in data.values())
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "degraded",
+            "error": str(e)
+        }), 500
 
 
 @app.route("/", methods=["GET"])
 def root():
+    """API Documentation"""
     return jsonify({
         "service": "ARsemble AI API",
-        "status": "running",
         "version": "1.0.0",
+        "documentation": "Visit /api/health for service status",
         "endpoints": {
-            "/recommend": "POST - AI recommendations",
-            "/lookup": "GET/POST - Component details",
-            "/shops": "GET - PC part shops",
-            "/budget-builds": "POST - Budget PC builds",
-            "/compatibility": "POST - Check compatibility",
-            "/components": "GET - List components",
-            "/health": "GET - Health check"
+            "POST /api/recommend": "AI recommendations",
+            "GET /api/lookup": "Component details",
+            "POST /api/budget-builds": "Budget PC builds",
+            "GET /api/components": "List components",
+            "GET /api/components/search": "Search components",
+            "GET /api/shops": "PC part shops",
+            "POST /api/compatibility": "Check compatibility",
+            "GET /api/health": "Health check"
         }
     })
 
+# ============================
+# 🚀 START SERVER
+# ============================
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "healthy", "service": "ARsemble AI API"})
 
-
-# ==========================
-# 🚀 Entry Point
-# ==========================
 if __name__ == "__main__":
-    logger.info(f"🚀 ARsemble API starting on http://{HOST}:{PORT}")
-    logger.info("📚 Available endpoints:")
-    logger.info("   GET  /          - API documentation")
-    logger.info("   POST /recommend - AI recommendations")
-    logger.info("   GET  /lookup    - Component details")
-    logger.info("   POST /budget-builds - Budget builds")
-    logger.info("   GET  /health    - Health check")
+    logger.info(f"🚀 ARsemble API Service starting on http://{HOST}:{PORT}")
+    logger.info("📚 Available Endpoints:")
+    logger.info("   GET  /                    - API documentation")
+    logger.info("   POST /api/recommend       - AI recommendations")
+    logger.info("   GET  /api/lookup          - Component details")
+    logger.info("   POST /api/budget-builds   - Budget builds")
+    logger.info("   GET  /api/components      - List components")
+    logger.info("   GET  /api/health          - Health check")
 
     app.run(host=HOST, port=PORT, debug=False)

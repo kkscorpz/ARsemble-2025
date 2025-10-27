@@ -1,13 +1,10 @@
-# api/render.yaml
 services:
   - type: web
     name: arsemble-api
     env: python
     plan: free
-    buildCommand: cd api && pip install -r requirements.txt
+    buildCommand: pip install -r api/requirements.txt
     startCommand: cd api && python api.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-      - key: API_PORT
-        value: 10000
