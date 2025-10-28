@@ -1,45 +1,40 @@
-# server.py — Pure Backend API Only (No HTML)
+# api_server.py - Pure Backend API for Render
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from waitress import serve
 import os
 import logging
-import traceback
 import json
-import threading
-from flask_compress import Compress
-from dotenv import load_dotenv
+from datetime import datetime
 
 # ----------------------------
-# Load .env and configuration
+# Configuration
 # ----------------------------
-load_dotenv()
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HOST = os.getenv("ARSSEMBLE_HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", os.getenv("ARSSEMBLE_PORT", "5000")))
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "10000"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-CLIENT_SHOP_ID = os.getenv("CLIENT_SHOP_ID")
-DEBUG_MODE = os.getenv("DEBUG", "False").lower() in ("1", "true", "yes")
+DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
 
 # ----------------------------
 # Logging
 # ----------------------------
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s: %(message)s"
+)
 logger = logging.getLogger("ARsemble-API")
 
 # ----------------------------
-# Flask app
+# Flask App
 # ----------------------------
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
-Compress(app)
+CORS(app)
 
 # ----------------------------
-# AI imports
+# AI Module Import with Better Error Handling
 # ----------------------------
+AI_AVAILABLE = False
 try:
+    # Try to import all AI functions
     from arsemble_ai import (
         get_ai_response,
         get_component_details,
@@ -48,22 +43,39 @@ try:
         get_compatible_components,
         recommend_psu_for_query_with_chips,
         analyze_bottleneck_text,
-        lookup_component_by_chip_id
+        lookup_component_by_chip_id,
+        data as component_data
     )
-    import arsemble_ai as arsemble_ai_mod
-    logger.info("✅ Successfully imported arsemble_ai module")
-except Exception as e:
-    logger.error(f"❌ Failed to import arsemble_ai: {e}")
-    # Provide stub implementations for critical functions
+    AI_AVAILABLE = True
+    logger.info("✅ arsemble_ai module imported successfully")
 
-    def get_ai_response(q):
-        return {"error": "AI module not available", "text": f"Stub response for: {q}"}
+except ImportError as e:
+    logger.error(f"❌ Failed to import arsemble_ai: {e}")
+
+    # Stub implementations
+    def get_ai_response(query):
+        return {
+            "source": "stub",
+            "text": f"AI module not available. Original query: {query}",
+            "error": "AI module failed to load"
+        }
 
     def get_component_details(chip_id):
-        return {"found": False, "error": "AI module not available"}
+        return {
+            "found": False,
+            "error": "AI module not available",
+            "debug": f"Requested: {chip_id}"
+        }
 
     def list_shops(only_public=True):
-        return []
+        return {
+            "smfp_computer": {
+                "name": "SMFP Computer",
+                "address": "594 J Nepomuceno St, Quiapo, Manila",
+                "region": "Metro Manila",
+                "public": True
+            }
+        }
 
     def budget_builds(budget, usage="general", top_n=3):
         return []
@@ -80,6 +92,8 @@ except Exception as e:
     def lookup_component_by_chip_id(chip_id):
         return None
 
+    component_data = {}
+
 # ----------------------------
 # API Routes
 # ----------------------------
@@ -91,28 +105,41 @@ def api_root():
     return jsonify({
         "service": "ARsemble AI Backend API",
         "version": "1.0",
+        "status": "running",
+        "ai_available": AI_AVAILABLE,
+        "timestamp": datetime.now().isoformat(),
         "endpoints": {
             "GET /": "This welcome page",
+            "GET /api/health": "Health check",
             "POST /api/chat": "Main AI chat endpoint",
-            "POST /api/recommend": "AI recommendations",
-            "GET /api/lookup": "Component lookup",
+            "GET /api/lookup?chip_id=...": "Component lookup",
             "POST /api/builds/budget": "Budget PC builds",
             "POST /api/compatibility": "Component compatibility check",
             "POST /api/psu/recommend": "PSU recommendations",
             "POST /api/analysis/bottleneck": "CPU/GPU bottleneck analysis",
-            "GET /api/shops": "List computer shops",
-            "GET /api/health": "Health check"
+            "GET /api/shops": "List computer shops"
+        },
+        "example_usage": {
+            "chat": 'curl -X POST https://your-api.onrender.com/api/chat -H "Content-Type: application/json" -d \'{"message": "Hello"}\'',
+            "health": "curl https://your-api.onrender.com/api/health"
         }
     })
 
 
 @app.route("/api/health", methods=["GET"])
-def health():
+def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
         "service": "ARsemble AI Backend API",
-        "timestamp": json.dumps(str(__import__('datetime').datetime.now()))
+        "timestamp": datetime.now().isoformat(),
+        "ai_module": "available" if AI_AVAILABLE else "unavailable",
+        "environment": {
+            "host": HOST,
+            "port": PORT,
+            "debug_mode": DEBUG_MODE,
+            "gemini_key_set": bool(GEMINI_API_KEY)
+        }
     })
 
 
@@ -120,89 +147,73 @@ def health():
 def chat_api():
     """
     Main AI chat endpoint
-    Expected JSON: {"message": "user query", "session_id": "optional"}
+    Expected JSON: {"message": "user query"}
     """
     try:
-        body = request.get_json(force=True) or {}
-        query = (body.get("message") or "").strip()
-        session_id = body.get("session_id", "default")
+        # Parse JSON data
+        if not request.is_json:
+            return jsonify({"error": "Content-Type must be application/json"}), 400
 
-        if not query:
-            return jsonify({"error": "Missing 'message' in request"}), 400
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Empty JSON body"}), 400
 
-        logger.info(f"Chat request - Session: {session_id}, Query: {query}")
+        message = data.get("message", "").strip()
+        if not message:
+            return jsonify({"error": "Missing 'message' field"}), 400
+
+        logger.info(f"Chat request: {message[:100]}...")
 
         # Get AI response
-        result = get_ai_response(query)
+        response = get_ai_response(message)
 
-        # Add session info
-        if isinstance(result, dict):
-            result['session_id'] = session_id
-            result['user_query'] = query
+        # Ensure response is properly formatted
+        if not isinstance(response, dict):
+            response = {"source": "ai", "text": str(response)}
 
-        return jsonify(result)
-
-    except Exception as e:
-        logger.exception("Error in /api/chat")
-        return jsonify({
-            "error": "server error in /api/chat",
-            "detail": str(e)
-        }), 500
-
-
-@app.route("/api/recommend", methods=["POST", "GET"])
-def recommend_api():
-    """
-    AI recommendations endpoint (legacy compatibility)
-    """
-    if request.method == "GET":
-        return jsonify({
-            "info": "POST JSON {'query':'your query'} to this endpoint",
-            "example": {"query": "Recommend me a ₱30000 gaming PC"}
+        # Add metadata
+        response.update({
+            "timestamp": datetime.now().isoformat(),
+            "user_query": message,
+            "ai_available": AI_AVAILABLE
         })
 
-    try:
-        body = request.get_json(force=True) or {}
-        query = (body.get("query") or "").strip()
-        if not query:
-            return jsonify({"error": "Missing 'query' in request"}), 400
-
-        logger.info(f"Recommendation query: {query}")
-        result = get_ai_response(query)
-
-        return jsonify(result)
+        return jsonify(response)
 
     except Exception as e:
-        logger.exception("Error in /api/recommend")
+        logger.error(f"Chat error: {str(e)}")
         return jsonify({
-            "error": "server error in /api/recommend",
-            "detail": str(e)
+            "error": "Internal server error in /api/chat",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
         }), 500
 
 
-@app.route("/api/lookup", methods=["POST", "GET"])
+@app.route("/api/lookup", methods=["GET"])
 def lookup_api():
     """
     Component lookup endpoint
+    GET: /api/lookup?chip_id=component_id
     """
     try:
-        if request.method == "GET":
-            chip_id = request.args.get(
-                "chip_id") or request.args.get("id") or ""
-        else:
-            body = request.get_json(force=True) or {}
-            chip_id = (body.get("chip_id") or body.get("id") or "").strip()
-
+        chip_id = request.args.get("chip_id", "").strip()
         if not chip_id:
-            return jsonify({"found": False, "error": "chip_id required"}), 400
+            return jsonify({
+                "error": "Missing chip_id parameter",
+                "example": "/api/lookup?chip_id=amd-ryzen-5-5600x"
+            }), 400
 
         logger.info(f"Component lookup: {chip_id}")
         details = get_component_details(chip_id)
+
         return jsonify(details)
 
     except Exception as e:
-        logger.exception("Error in /api/lookup")
-        return jsonify({"error": "server error in /api/lookup", "detail": str(e)}), 500
+        logger.error(f"Lookup error: {str(e)}")
+        return jsonify({
+            "error": "Component lookup failed",
+            "message": str(e)
+        }), 500
 
 
 @app.route("/api/builds/budget", methods=["POST"])
@@ -212,13 +223,16 @@ def budget_builds_api():
     Expected JSON: {"budget": 50000, "usage": "gaming", "top_n": 3}
     """
     try:
-        body = request.get_json(force=True) or {}
-        budget = body.get("budget")
-        usage = body.get("usage", "general")
-        top_n = body.get("top_n", 3)
+        if not request.is_json:
+            return jsonify({"error": "Content-Type must be application/json"}), 400
 
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Empty JSON body"}), 400
+
+        budget = data.get("budget")
         if budget is None:
-            return jsonify({"error": "Missing 'budget' in request"}), 400
+            return jsonify({"error": "Missing 'budget' field"}), 400
 
         try:
             budget = int(budget)
@@ -228,7 +242,10 @@ def budget_builds_api():
         if budget <= 0:
             return jsonify({"error": "Budget must be positive"}), 400
 
-        logger.info(f"Budget builds request: ₱{budget}, usage: {usage}")
+        usage = data.get("usage", "general")
+        top_n = data.get("top_n", 3)
+
+        logger.info(f"Budget builds: ₱{budget}, usage: {usage}")
 
         builds = budget_builds(budget, usage=usage, top_n=top_n)
 
@@ -236,14 +253,15 @@ def budget_builds_api():
             "budget": budget,
             "usage": usage,
             "builds": builds,
-            "count": len(builds)
+            "count": len(builds),
+            "timestamp": datetime.now().isoformat()
         })
 
     except Exception as e:
-        logger.exception("Error in /api/builds/budget")
+        logger.error(f"Budget builds error: {str(e)}")
         return jsonify({
-            "error": "server error in /api/builds/budget",
-            "detail": str(e)
+            "error": "Failed to generate budget builds",
+            "message": str(e)
         }), 500
 
 
@@ -254,25 +272,28 @@ def compatibility_api():
     Expected JSON: {"query": "compatibility query"}
     """
     try:
-        body = request.get_json(force=True) or {}
-        query = (body.get("query") or "").strip()
+        if not request.is_json:
+            return jsonify({"error": "Content-Type must be application/json"}), 400
 
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Empty JSON body"}), 400
+
+        query = data.get("query", "").strip()
         if not query:
-            return jsonify({"error": "Missing 'query' in request"}), 400
+            return jsonify({"error": "Missing 'query' field"}), 400
 
         logger.info(f"Compatibility check: {query}")
 
-        # You'll need to import your data or pass it differently
-        from arsemble_ai import data as component_data
         result = get_compatible_components(query, component_data)
 
         return jsonify(result)
 
     except Exception as e:
-        logger.exception("Error in /api/compatibility")
+        logger.error(f"Compatibility error: {str(e)}")
         return jsonify({
-            "error": "server error in /api/compatibility",
-            "detail": str(e)
+            "error": "Compatibility check failed",
+            "message": str(e)
         }), 500
 
 
@@ -283,17 +304,21 @@ def psu_recommend_api():
     Expected JSON: {"query": "PSU query", "headroom_percent": 30}
     """
     try:
-        body = request.get_json(force=True) or {}
-        query = (body.get("query") or "").strip()
-        headroom_percent = body.get("headroom_percent", 30)
+        if not request.is_json:
+            return jsonify({"error": "Content-Type must be application/json"}), 400
 
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Empty JSON body"}), 400
+
+        query = data.get("query", "").strip()
         if not query:
-            return jsonify({"error": "Missing 'query' in request"}), 400
+            return jsonify({"error": "Missing 'query' field"}), 400
 
-        logger.info(
-            f"PSU recommendation: {query}, headroom: {headroom_percent}%")
+        headroom_percent = data.get("headroom_percent", 30)
 
-        from arsemble_ai import data as component_data
+        logger.info(f"PSU recommendation: {query}")
+
         result = recommend_psu_for_query_with_chips(
             query,
             component_data,
@@ -303,74 +328,10 @@ def psu_recommend_api():
         return jsonify(result)
 
     except Exception as e:
-        logger.exception("Error in /api/psu/recommend")
+        logger.error(f"PSU recommendation error: {str(e)}")
         return jsonify({
-            "error": "server error in /api/psu/recommend",
-            "detail": str(e)
-        }), 500
-
-
-@app.route("/api/analysis/bottleneck", methods=["POST"])
-def bottleneck_analysis_api():
-    """
-    CPU/GPU bottleneck analysis
-    Expected JSON: {"cpu": "cpu_name", "gpu": "gpu_name", "resolution": "1080p", "settings": "high", "target_fps": 60}
-    """
-    try:
-        body = request.get_json(force=True) or {}
-        cpu_name = body.get("cpu", "").strip()
-        gpu_name = body.get("gpu", "").strip()
-        resolution = body.get("resolution", "1080p")
-        settings = body.get("settings", "high")
-        target_fps = body.get("target_fps", 60)
-
-        if not cpu_name or not gpu_name:
-            return jsonify({"error": "Missing 'cpu' or 'gpu' in request"}), 400
-
-        logger.info(f"Bottleneck analysis: CPU={cpu_name}, GPU={gpu_name}")
-
-        # Lookup components
-        cpu = lookup_component_by_chip_id(cpu_name)
-        if not cpu:
-            # Try fuzzy matching
-            from arsemble_ai import _best_match_in_dataset, data
-            cpu_obj, _ = _best_match_in_dataset(
-                cpu_name, {"cpu": data.get("cpu", {})})
-            cpu = cpu_obj
-
-        gpu = lookup_component_by_chip_id(gpu_name)
-        if not gpu:
-            from arsemble_ai import _best_match_in_dataset, data
-            gpu_obj, _ = _best_match_in_dataset(
-                gpu_name, {"gpu": data.get("gpu", {})})
-            gpu = gpu_obj
-
-        if not cpu or not gpu:
-            return jsonify({
-                "error": "Could not find both CPU and GPU components"
-            }), 404
-
-        analysis_text = analyze_bottleneck_text(
-            cpu, gpu,
-            resolution=resolution,
-            settings=settings,
-            target_fps=target_fps
-        )
-
-        return jsonify({
-            "cpu": cpu.get('name'),
-            "gpu": gpu.get('name'),
-            "analysis": analysis_text,
-            "resolution": resolution,
-            "settings": settings,
-            "target_fps": target_fps
-        })
-
-    except Exception as e:
-        logger.exception("Error in /api/analysis/bottleneck")
-        return jsonify({
-            "error": "server error in /api/analysis/bottleneck",
-            "detail": str(e)
+            "error": "PSU recommendation failed",
+            "message": str(e)
         }), 500
 
 
@@ -378,7 +339,6 @@ def bottleneck_analysis_api():
 def shops_api():
     """
     Get list of computer shops
-    Query params: ?public_only=true
     """
     try:
         public_only = request.args.get('public_only', 'true').lower() == 'true'
@@ -387,53 +347,32 @@ def shops_api():
         return jsonify({
             "shops": shops,
             "count": len(shops),
-            "public_only": public_only
+            "public_only": public_only,
+            "timestamp": datetime.now().isoformat()
         })
 
     except Exception as e:
-        logger.exception("Error in /api/shops")
+        logger.error(f"Shops error: {str(e)}")
         return jsonify({
-            "error": "server error in /api/shops",
-            "detail": str(e)
+            "error": "Failed to get shops",
+            "message": str(e)
         }), 500
 
-
-@app.route("/api/ai/stream", methods=["POST"])
-def ai_stream_api():
-    """
-    Streaming AI response endpoint (if needed)
-    """
-    try:
-        body = request.get_json(force=True) or {}
-        prompt = (body.get("prompt") or "").strip()
-
-        if not prompt:
-            return jsonify({"error": "Missing 'prompt' in request"}), 400
-
-        def generate():
-            try:
-                result = get_ai_response(prompt)
-                if isinstance(result, dict):
-                    yield json.dumps(result) + "\n"
-                else:
-                    yield json.dumps({"text": str(result)}) + "\n"
-            except Exception as e:
-                yield json.dumps({"error": str(e)}) + "\n"
-
-        return Response(generate(), mimetype="application/json")
-
-    except Exception as e:
-        logger.exception("Error in /api/ai/stream")
-        return jsonify({"error": "server error in streaming"}), 500
-
 # ----------------------------
-# Error handlers
+# Error Handlers
 # ----------------------------
 
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"error": "Endpoint not found"}), 404
+    return jsonify({
+        "error": "Endpoint not found",
+        "available_endpoints": [
+            "/", "/api/health", "/api/chat", "/api/lookup",
+            "/api/builds/budget", "/api/compatibility",
+            "/api/psu/recommend", "/api/shops"
+        ]
+    }), 404
 
 
 @app.errorhandler(405)
@@ -447,15 +386,23 @@ def internal_server_error(error):
 
 
 # ----------------------------
-# Start server
+# Startup
 # ----------------------------
 if __name__ == "__main__":
+    logger.info("🚀 Starting ARsemble API Server")
+    logger.info(f"📍 Host: {HOST}, Port: {PORT}")
+    logger.info(f"🔧 Debug Mode: {DEBUG_MODE}")
     logger.info(
-        "🚀 Starting ARsemble Pure Backend API on http://%s:%s", HOST, PORT)
-    logger.info("📚 API Documentation available at: http://localhost:%s", PORT)
-    logger.info("🔧 Debug mode: %s", DEBUG_MODE)
+        f"🤖 AI Module: {'✅ Available' if AI_AVAILABLE else '❌ Unavailable'}")
 
+    if not GEMINI_API_KEY:
+        logger.warning(
+            "⚠️  GEMINI_API_KEY not set - Gemini features may not work")
+
+    # Use production server for Render
     if DEBUG_MODE:
-        app.run(host=HOST, port=PORT, debug=True)
+        from waitress import serve
+        serve(app, host=HOST, port=PORT)
     else:
+        from waitress import serve
         serve(app, host=HOST, port=PORT)
