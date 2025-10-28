@@ -2572,9 +2572,19 @@ def get_ai_response(user_input: str) -> dict:
 
         # ---------- 3.5.5) Shops / retailers suggestion (client-first) ----------
         shop_patterns = [
-            r"\bshop\b", r"\bstore\b", r"\bretailer\b", r"\bwhere to buy\b",
-            r"\bwhere can i buy\b", r"\bpurchase\b", r"\bbuy\b", r"\bcomputer shop\b",
-            r"\bpc shop\b", r"\bcomputer store\b", r"\bsuggest shops\b", r"\bsuggest any computer shops\b"
+            r"\bshop(s)?\b",
+            r"\bstore(s)?\b",
+            r"\bretailer(s)?\b",
+            r"\bwhere to buy\b",
+            r"\bwhere can i buy\b",
+            r"\bpurchase(s)?\b",
+            r"\bbuy(s)?\b",
+            r"\bcomputer shop(s)?\b",
+            r"\bpc shop(s)?\b",
+            r"\bcomputer store(s)?\b",
+            r"\bsuggest shop(s)?\b",
+            r"\bsuggest any computer shop(s)?\b",
+
         ]
         is_shop_query = any(re.search(pattern, lower_q)
                             for pattern in shop_patterns)
