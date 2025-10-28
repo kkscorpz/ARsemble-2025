@@ -29,10 +29,10 @@
       }
       .phone {
         background: var(--bg);
-        width: 470px;
+        width: 420px;
         max-width: 100%;
-        height: 900px;
-        max-height: 100vh;
+        height: 740px;
+        max-height: 90vh;
         border-radius: 20px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
         display: flex;
@@ -177,7 +177,11 @@
   <body>
     <div class="phone">
       <div class="topbar">
-        <div class="icons"></div>
+        <div>ASK AI</div>
+        <div class="icons">
+          <button title="Back">⟲</button>
+          <button title="Help">?</button>
+        </div>
       </div>
 
       <div class="content" id="chat"></div>
@@ -621,19 +625,16 @@
               return;
             }
 
-            // 🧩 Handle responses by source - IMPROVED COMPATIBILITY FORMAT
+            // 🧩 Handle responses by source - FIXED COMPATIBILITY FORMAT
             if (data.source === "local-compatibility") {
               const verdict = data.verdict || "unknown";
               const emoji = data.emoji_verdict || "🔍";
               const reason = data.reason || "";
               const target = data.target || "component";
-              const targetType = data.target_type || "component";
-              const compatibleType = data.compatible_type || "components";
 
-              // Build clean compatibility message - IMPROVED FORMAT
-              let compatMessage = `${emoji} COMPATIBILITY CHECK\n\n`;
-              compatMessage += `Component: ${target}\n`;
-              compatMessage += `Type: ${targetType.toUpperCase()}\n\n`;
+              // Build clean compatibility message - FIXED FORMAT
+              let compatMessage = `${emoji} COMPATIBILITY: ${verdict.toUpperCase()}\n\n`;
+              compatMessage += `Component: ${target}\n\n`;
 
               if (reason) {
                 compatMessage += `Technical Check: ${reason}\n\n`;
@@ -641,7 +642,7 @@
 
               appendAssistant(compatMessage);
 
-              // Show compatible options - IMPROVED: Better organization
+              // Show compatible options - FIXED: Only show chips if we have them
               const hasResults =
                 Array.isArray(data.results) && data.results.length > 0;
               const hasChips =
@@ -649,36 +650,26 @@
 
               if (hasResults || hasChips) {
                 const optionsToShow = hasResults ? data.results : data.chips;
+                appendAssistant("✅ Compatible Options:");
+                renderChips(
+                  optionsToShow.slice(0, 8),
+                  (c) => {
+                    const id =
+                      c.id ||
+                      (c.type && (c.meta?.name || c.text)
+                        ? `${c.type}:${(c.meta?.name || c.text)
+                            .toLowerCase()
+                            .replace(/\s+/g, "-")}`
+                        : null);
+                    if (id) return lookupChip(id);
+                  },
+                  "text",
+                  true
+                );
+              }
 
-                // Group chips by type for better organization
-                const chipsByType = {};
-                optionsToShow.forEach((chip) => {
-                  const type = chip.type || "other";
-                  if (!chipsByType[type]) chipsByType[type] = [];
-                  chipsByType[type].push(chip);
-                });
-
-                // Show compatible options by type
-                Object.entries(chipsByType).forEach(([type, chips]) => {
-                  const typeLabel = type.toUpperCase().replace("_", " ");
-                  appendAssistant(`✅ Compatible ${typeLabel}:`);
-                  renderChips(
-                    chips.slice(0, 6), // Limit to 6 per type
-                    (c) => {
-                      const id =
-                        c.id ||
-                        (c.type && (c.meta?.name || c.text)
-                          ? `${c.type}:${(c.meta?.name || c.text)
-                              .toLowerCase()
-                              .replace(/\s+/g, "-")}`
-                          : null);
-                      if (id) return lookupChip(id);
-                    },
-                    "text",
-                    true
-                  );
-                });
-              } else {
+              // If no results found
+              if (!hasResults && !hasChips) {
                 appendAssistant(
                   data.message ||
                     "❌ No compatible components found. Please check specifications manually."
@@ -746,13 +737,9 @@
               } else {
                 appendAssistant("No items found.");
               }
-            } else if (data.source === "local-bottleneck") {
-              // Handle bottleneck analysis specifically
-              appendAssistant(data.text);
             } else if (data.text) {
               appendAssistant(data.text);
 
-              // Show chips if available
               if (
                 Array.isArray(data.results) &&
                 data.results.length &&

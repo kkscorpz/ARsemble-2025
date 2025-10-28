@@ -760,509 +760,128 @@ def _format_price(price):
     return str(price or "")
 
 
+# ======================
+#   Main Compatibility
+# ======================
+
 def get_compatible_components(query: str, data: dict) -> dict:
     """
-    Comprehensive compatibility checker (self-contained).
-    - Bottleneck analysis for "A compatible with B" style queries.
-    - "What X works with Y?" style queries.
-    - Robust parsing, model-number-aware matching, legacy-GPU heuristics,
-      and usage recommendations (Office / Casual Gaming / Gaming / High-End).
+    Rewritten, clearer compatibility checker.
+    - Handles: "A works with B", "What X works with Y", bottleneck cpu/gpu, and single-component queries.
+    - Relies on helpers defined elsewhere in file: _best_match_in_dataset, _format_price, _parse_psu_wattage, slugify, _normalize_text_for_match, _safe_int_from_field, estimate_cpu_capacity, estimate_gpu_capacity, analyze_bottleneck_text.
+    - Returns a dict with keys similar to the original code: source, found, reason, text, target, target_type, compatible_type, results, chips.
     """
     try:
-        import re
-        import os
-        import math
-
-        # -------------------------
-        # Local small helpers
-        # -------------------------
-        def _safe_int_from_field(val, default=0):
-            try:
-                if val is None:
-                    return int(default)
-                if isinstance(val, int):
-                    return val
-                if isinstance(val, float):
-                    return int(val)
-                s = str(val).strip().lower()
-                m = re.search(r"(\d+(?:\.\d+)?)", s)
-                if m:
-                    return int(float(m.group(1)))
-                digits = re.sub(r"[^\d]", "", s)
-                if digits:
-                    return int(digits)
-                return int(default)
-            except Exception:
-                try:
-                    return int(default)
-                except Exception:
-                    return 0
-
-        def _parse_wattage_to_int(val):
-            try:
-                if val is None:
-                    return 0
-                s = str(val)
-                m = re.search(r"(\d{2,4})", s)
-                if m:
-                    return int(m.group(1))
-                try:
-                    return int(float(s))
-                except Exception:
-                    digits = re.sub(r"[^\d]", "", s)
-                    return int(digits) if digits else 0
-            except Exception:
-                return 0
-
-        def _format_price(price):
-            try:
-                if price is None or price == "":
-                    return ""
-                if isinstance(price, str) and ("-" in price or "–" in price):
-                    parts = re.split(r"[-–]", price)
-                    parts_int = []
-                    for p in parts:
-                        digits = re.sub(r"[^\d]", "", p)
-                        if digits:
-                            parts_int.append(int(digits))
-                    if len(parts_int) == 2:
-                        return f"₱{parts_int[0]:,}–₱{parts_int[1]:,}"
-                digits = re.sub(r"[^\d]", "", str(price) or "")
-                if digits:
-                    val = int(digits)
-                    return f"₱{val:,}"
-            except Exception:
-                pass
-            return str(price or "")
-
-        def _slugify(s):
-            try:
-                s = str(s or "")
-                s = s.lower().strip()
-                s = re.sub(r"[^\w\s-]", "", s)
-                s = re.sub(r"[\s_]+", "-", s)
-                return s.strip("-")
-            except Exception:
-                return str(s or "")
-
-        # fallback price parser
-        def _parse_price_to_int_local(p):
-            try:
-                if p is None:
-                    return 0
-                s = str(p)
-                digits = re.sub(r"[^\d]", "", s)
-                return int(digits) if digits else 0
-            except Exception:
-                return 0
-
-        # fallback PSU wattage extractor
-        def _parse_psu_wattage_local(psu):
-            try:
-                if not psu:
-                    return 0
-                if isinstance(psu, (int, float)):
-                    return int(psu)
-                if isinstance(psu, dict):
-                    for k in ("wattage", "watt", "power", "rating"):
-                        if k in psu and psu[k]:
-                            return _parse_wattage_to_int(psu[k])
-                    if "name" in psu:
-                        return _parse_wattage_to_int(psu.get("name"))
-                    return 0
-                return _parse_wattage_to_int(str(psu))
-            except Exception:
-                return 0
-
-        # Use global helpers if present, else use local fallbacks
-        _parse_price_to_int = globals().get(
-            "_parse_price_to_int", _parse_price_to_int_local)
-        _parse_psu_wattage = globals().get("_parse_psu_wattage", _parse_psu_wattage_local)
-
-        # -------------------------
-        # Capacity estimators
-        # -------------------------
-        def estimate_cpu_capacity(cpu: dict) -> float:
-            try:
-                if not cpu:
-                    return 0.0
-                score = cpu.get("score") or cpu.get("cpu_score")
-                if score:
-                    try:
-                        return float(score)
-                    except:
-                        pass
-                cores = cpu.get("cores") or cpu.get("physical_cores") or 0
-                threads = cpu.get("threads") or cpu.get("logical_cores") or 0
-
-                def _parse_ghz(val):
-                    try:
-                        if val is None:
-                            return 0.0
-                        s = str(val)
-                        m = re.search(r"(\d+(?:\.\d+)?)", s)
-                        return float(m.group(1)) if m else float(val)
-                    except:
-                        return 0.0
-
-                base_clock = _parse_ghz(cpu.get("base_clock") or cpu.get(
-                    "base") or cpu.get("clock") or 0)
-                boost_clock = _parse_ghz(
-                    cpu.get("boost_clock") or cpu.get("boost") or 0)
-
-                def _parse_int(val):
-                    try:
-                        if val is None:
-                            return 0
-                        s = str(val)
-                        m = re.search(r"(\d{2,4})", s)
-                        return int(m.group(1)) if m else int(float(s))
-                    except:
-                        return 0
-
-                tdp = _parse_int(cpu.get("tdp") or cpu.get(
-                    "power") or cpu.get("tdp_w") or 0)
-                core_factor = float(cores) if cores else (
-                    float(threads)*0.6 if threads else 0.0)
-                clock_factor = base_clock if base_clock else (
-                    boost_clock*0.9 if boost_clock else 0.0)
-                score_est = (core_factor * clock_factor * 100.0)
-                score_est += (boost_clock * 10.0) + (threads * 5.0)
-                score_est += (tdp * 0.5)
-                return max(0.0, float(score_est))
-            except Exception:
-                return 0.0
-
-        def estimate_gpu_capacity(gpu: dict) -> float:
-            try:
-                if not gpu:
-                    return 0.0
-                score = gpu.get("score") or gpu.get("gpu_score")
-                if score:
-                    try:
-                        return float(score)
-                    except:
-                        pass
-                vram_field = gpu.get("vram") or gpu.get(
-                    "memory") or gpu.get("vram_gb")
-                vram_gb = _safe_int_from_field(vram_field, default=0)
-                power_field = gpu.get("power") or gpu.get(
-                    "tdp") or gpu.get("wattage")
-                power = _parse_wattage_to_int(power_field)
-                score_est = (vram_gb * 1000.0) + (power * 2.0) + 50.0
-                rank = gpu.get("gpu_rank") or gpu.get("rank")
-                if rank:
-                    try:
-                        score_est *= (1.0 + (float(rank)/100.0))
-                    except:
-                        pass
-                return max(0.0, float(score_est))
-            except Exception:
-                return 0.0
-
-        # -------------------------
-        # Improved matching: exact name, numeric model token, token-overlap
-        # -------------------------
-        def _best_match_in_dataset(query_str: str, subset: dict):
-            if not query_str or not subset:
-                return None, None
-            q = str(query_str).strip().lower()
-            q_tokens = re.findall(r"[a-z0-9]+", q)
-
-            # 1) exact full-name or key match
-            for comp_type, bucket in subset.items():
-                for key, obj in bucket.items():
-                    name = (obj.get("name") or "").strip().lower()
-                    if name and name == q:
-                        return obj, comp_type
-                    if str(key).lower().strip() == q:
-                        return obj, comp_type
-
-            # 2) numeric model token match (e.g., '5600' => Ryzen 5 5600)
-            numeric_tokens = [
-                t for t in q_tokens if re.fullmatch(r"\d{3,5}", t)]
-            if numeric_tokens:
-                for tok in numeric_tokens:
-                    for comp_type, bucket in subset.items():
-                        for key, obj in bucket.items():
-                            name_l = (obj.get("name") or "").lower()
-                            if tok in name_l or tok in str(key).lower():
-                                return obj, comp_type
-
-            # 3) token-overlap scoring
-            best_score = -1
-            best_obj = None
-            best_type = None
-            for comp_type, bucket in subset.items():
-                for key, obj in bucket.items():
-                    name = (obj.get("name") or "").lower()
-                    if not name:
-                        continue
-                    match_count = 0.0
-                    for tok in q_tokens:
-                        if tok and tok in name:
-                            match_count += 1.0
-                    key_l = str(key or "").lower()
-                    for tok in q_tokens:
-                        if tok and tok in key_l:
-                            match_count += 0.5
-                    if q_tokens:
-                        # small boost if brand token matches first query token
-                        if q_tokens[0] in name:
-                            match_count += 0.2
-                    if match_count > 0:
-                        score = match_count + (len(name.split()) * 0.01)
-                        if score > best_score:
-                            best_score = score
-                            best_obj = obj
-                            best_type = comp_type
-                        elif score == best_score and best_obj:
-                            if len(name) > len((best_obj.get("name") or "").lower()):
-                                best_obj = obj
-                                best_type = comp_type
-            if best_score > 0 and best_obj:
-                return best_obj, best_type
-            return None, None
-
-        # -------------------------
-        # Identify CPU vs GPU heuristics
-        # -------------------------
-        def improve_component_identification(a, b):
-            a_is_cpu = bool(a.get("cores") or a.get("cpu_score") or re.search(
-                r"\b(ryzen|intel|core|xeon)\b", (a.get("name") or "").lower()))
-            b_is_cpu = bool(b.get("cores") or b.get("cpu_score") or re.search(
-                r"\b(ryzen|intel|core|xeon)\b", (b.get("name") or "").lower()))
-            a_is_gpu = bool(a.get("vram") or a.get("gpu_score") or re.search(
-                r"\b(gtx|rtx|radeon|vga)\b", (a.get("name") or "").lower()))
-            b_is_gpu = bool(b.get("vram") or b.get("gpu_score") or re.search(
-                r"\b(gtx|rtx|radeon|vga)\b", (b.get("name") or "").lower()))
-            cpu = None
-            gpu = None
-            if a_is_cpu and b_is_gpu:
-                cpu, gpu = a, b
-            elif b_is_cpu and a_is_gpu:
-                cpu, gpu = b, a
-            else:
-                an = (a.get("name") or "").lower()
-                bn = (b.get("name") or "").lower()
-                if "ryzen" in an or "intel" in an:
-                    cpu, gpu = a, b
-                elif "ryzen" in bn or "intel" in bn:
-                    cpu, gpu = b, a
-                elif "gtx" in an or "rtx" in an or "radeon" in an:
-                    gpu, cpu = a, b
-                elif "gtx" in bn or "rtx" in bn or "radeon" in bn:
-                    gpu, cpu = b, a
-                else:
-                    # final fallback: use presence of numeric model tokens (GPUs often include 'GTX','RTX', CPUs include 'Ryzen','i7')
-                    if any(tok in an for tok in ["gtx", "rtx", "rx", "radeon"]):
-                        gpu, cpu = a, b
-                    else:
-                        cpu, gpu = a, b
-            return cpu, gpu
-
-        # allow external analyzer if present
-        analyzer = globals().get("analyze_bottleneck_text", None)
-
-        # -------------------------
-        # Parse intents
-        # -------------------------
         q_raw = (query or "").strip()
         q_lower = q_raw.lower()
-        if not q_lower:
-            return {"found": False, "message": "No query provided."}
 
-        CLIENT_SHOP_ID = os.getenv("CLIENT_SHOP_ID", "smfp_computer")
-
+        # simple regex sets used by your original code (keeps behavior compatible)
         works_with_patterns = [
-            r"what\s+(.+?)\s+works?\s+with\s+(.+)$",
-            r"which\s+(.+?)\s+works?\s+with\s+(.+)$",
-            r"(.+?)\s+that\s+works?\s+with\s+(.+)$",
-            r"(.+?)\s+for\s+(.+)$",
-            r"compatible\s+(.+?)\s+for\s+(.+)$",
-            r"^(.+?)\s+compatible\s+with\s+(.+)$",
-            r"^(.+?)\s+compatible\s+(.+)$"
+            r"(?:what|which|which of the|what )\s*(.+?)\s*(?:work with|fit|compatible with|is compatible with|support)\s*(.+)",
+            r"(.+?)\s+works with\s+(.+)",
+            r"(.+?)\s+compatible with\s+(.+)"
         ]
         bottleneck_patterns = [
-            r"is\s+(.+?)\s+compatible\s+with\s+(.+?)$",
-            r"does\s+(.+?)\s+work\s+with\s+(.+?)$",
-            r"compatibility\s+between\s+(.+?)\s+and\s+(.+?)$",
-            r"(.+?)\s+(?:and|\+|with|\/)\s+(.+?)\s+(?:compatible|bottleneck|work together|work with)$",
-            r"^(.+?)\s*(?:and|,|\+)\s*(.+?)$"
+            r"(.+?)\s+vs\.?\s+(.+)",
+            r"(.+?)\s+vs\s+(.+)",
+            r"(.+?)\s+and\s+(.+?)\s+bottleneck"
         ]
 
-        # 1) Bottleneck-style queries
-        component_a = component_b = None
+        # Helper: build chip dict for frontend (consistent shape used in this file)
+        def _chip_obj(item, comp_type):
+            return {
+                "id": f"{comp_type}:{slugify(item.get('name', ''))}",
+                "text": item.get("name") or "",
+                "price": item.get("price") or "",
+                "type": comp_type,
+                "meta": item
+            }
+
+        # Helper: prefer items available in CLIENT_SHOP_ID if such constant exists
+        def _prefer_shop(items):
+            try:
+                preferred = [it for it in items if CLIENT_SHOP_ID in (
+                    it.get("stores") or [])]
+                return preferred if preferred else items
+            except Exception:
+                return items
+
+        # 1) Bottleneck detection (CPU vs GPU)
         for pat in bottleneck_patterns:
             m = re.search(pat, q_lower, re.IGNORECASE)
             if m:
-                component_a = m.group(1).strip()
-                component_b = m.group(2).strip()
-                break
-
-        # Bottleneck handling
-        if component_a and component_b:
-            # logging-like prints (your environment might prefer actual logger)
-            try:
-                print("INFO:🔄 Routing to compatibility checker:", q_raw)
-                print(
-                    f"INFO:🔍 [BOTTLENECK DETECTED] A: {component_a}, B: {component_b}")
-            except:
-                pass
-
-            comp_a_obj, comp_a_type = _best_match_in_dataset(component_a, data)
-            comp_b_obj, comp_b_type = _best_match_in_dataset(component_b, data)
-
-            if comp_a_obj and comp_b_obj:
-                # debug-ish prints
+                a = m.group(1).strip()
+                b = m.group(2).strip()
                 try:
-                    print("🔍 [DEBUG] Component A:", comp_a_obj.get("name"), "CPU score:", comp_a_obj.get("cpu_score") or comp_a_obj.get(
-                        "score") or 0, "GPU score:", comp_a_obj.get("gpu_score") or comp_a_obj.get("score") or 0)
-                    print("🔍 [DEBUG] Component B:", comp_b_obj.get("name"), "CPU score:", comp_b_obj.get("cpu_score") or comp_b_obj.get(
-                        "score") or 0, "GPU score:", comp_b_obj.get("gpu_score") or comp_b_obj.get("score") or 0)
-                except:
-                    pass
-
-                cpu_obj, gpu_obj = None, None
-                try:
-                    cpu_obj, gpu_obj = improve_component_identification(
-                        comp_a_obj, comp_b_obj)
+                    a_obj, a_type = _best_match_in_dataset(a, data)
+                    b_obj, b_type = _best_match_in_dataset(b, data)
                 except Exception:
-                    cpu_obj, gpu_obj = comp_a_obj, comp_b_obj
+                    a_obj = b_obj = None
+                    a_type = b_type = None
+
+                # assign cpu/gpu
+                def assign_cpu_gpu(x_obj, y_obj):
+                    if not x_obj or not y_obj:
+                        return None, None
+                    xt = (x_obj.get("type") or "").lower()
+                    yt = (y_obj.get("type") or "").lower()
+                    if "cpu" in xt and "gpu" in yt:
+                        return x_obj, y_obj
+                    if "cpu" in yt and "gpu" in xt:
+                        return y_obj, x_obj
+                    # fallback: use heuristics by name
+                    name_x = (x_obj.get("name") or "").lower()
+                    name_y = (y_obj.get("name") or "").lower()
+                    if re.search(r"\b(ryzen|intel|i5|i7|i9|5600|5800|7700|14700)\b", name_x) and re.search(r"\b(rtx|gtx|rx|radeon|vram)\b", name_y):
+                        return x_obj, y_obj
+                    if re.search(r"\b(ryzen|intel|i5|i7|i9|5600|5800|7700|14700)\b", name_y) and re.search(r"\b(rtx|gtx|rx|radeon|vram)\b", name_x):
+                        return y_obj, x_obj
+                    return None, None
+
+                cpu_obj, gpu_obj = assign_cpu_gpu(a_obj, b_obj)
+                if not cpu_obj or not gpu_obj:
+                    cpu_obj, gpu_obj = assign_cpu_gpu(b_obj, a_obj)
 
                 if cpu_obj and gpu_obj:
-                    # estimate capacities
+                    # estimate capacities (use functions if present, else try fields)
                     try:
-                        cpu_cap = estimate_cpu_capacity(cpu_obj)
-                    except:
+                        cpu_cap = float(estimate_cpu_capacity(cpu_obj) or cpu_obj.get(
+                            "cpu_score") or cpu_obj.get("score") or 1.0)
+                    except Exception:
                         cpu_cap = float(cpu_obj.get("cpu_score")
-                                        or cpu_obj.get("score") or 0.0)
+                                        or cpu_obj.get("score") or 1.0)
                     try:
-                        gpu_cap = estimate_gpu_capacity(gpu_obj)
-                    except:
-                        vram = _safe_int_from_field(gpu_obj.get(
-                            "vram") or gpu_obj.get("memory") or 0)
-                        power = _parse_wattage_to_int(
-                            gpu_obj.get("power") or gpu_obj.get("tdp") or 0)
-                        gpu_cap = float(
-                            vram * 1000 + power * 2 + (gpu_obj.get("gpu_score") or gpu_obj.get("score") or 0))
+                        gpu_cap = float(estimate_gpu_capacity(gpu_obj) or gpu_obj.get(
+                            "gpu_score") or gpu_obj.get("score") or 1.0)
+                    except Exception:
+                        gpu_cap = float(gpu_obj.get("gpu_score")
+                                        or gpu_obj.get("score") or 1.0)
 
-                    cpu_cap = max(float(cpu_cap or 1.0), 1.0)
-                    gpu_cap = max(float(gpu_cap or 1.0), 1.0)
+                    cpu_cap = max(cpu_cap, 1.0)
+                    gpu_cap = max(gpu_cap, 1.0)
                     ratio = gpu_cap / cpu_cap
+                    severity = "low"
+                    if ratio < 0.45:
+                        severity = "severe"
+                    elif ratio < 0.75:
+                        severity = "high"
+                    elif ratio < 0.95:
+                        severity = "moderate"
 
-                    # Legacy GPU heuristic
-                    gpu_name_lc = (gpu_obj.get("name") or "").lower()
-                    gpu_vram_val = _safe_int_from_field(gpu_obj.get(
-                        "vram") or gpu_obj.get("memory") or 0, default=0)
-                    gpu_power_val = _parse_wattage_to_int(
-                        gpu_obj.get("power") or gpu_obj.get("tdp") or 0)
+                    # build response chips
+                    results_chips = [
+                        _chip_obj(cpu_obj, "cpu"), _chip_obj(gpu_obj, "gpu")]
 
-                    legacy_tokens = ["750", "gtx 750", "gtx750", "gtx 650",
-                                     "gtx 550", "gtx 660", "gts", "gt 610", "gt 620", "950", "960"]
-                    looks_legacy = any(
-                        tok in gpu_name_lc for tok in legacy_tokens) or gpu_vram_val <= 2 or gpu_power_val <= 80
-
-                    # severity buckets with legacy override
-                    if looks_legacy:
-                        if ratio < 0.6:
-                            severity = "severe"
-                            severity_label = "SEVERE — GPU is very weak compared to CPU (legacy/low-spec GPU)"
-                        else:
-                            severity = "high"
-                            severity_label = "HIGH — GPU will noticeably bottleneck the CPU (legacy/low-spec GPU)"
-                    else:
-                        if ratio < 0.45:
-                            severity = "severe"
-                            severity_label = "SEVERE — GPU is very weak compared to CPU"
-                        elif ratio < 0.75:
-                            severity = "high"
-                            severity_label = "HIGH — GPU will noticeably bottleneck the CPU"
-                        elif ratio < 0.95:
-                            severity = "moderate"
-                            severity_label = "MODERATE — some imbalance, fine for light loads"
-                        else:
-                            severity = "low"
-                            severity_label = "LOW — balanced for most tasks"
-
-                    # usage recommendation
-                    usage_category = "General"
-                    usage_emoji = "🧩"
-                    if severity == "severe" or ratio < 0.5:
-                        usage_category = "Office / Light Multimedia"
-                        usage_emoji = "🧾"
-                    elif severity == "high" or (0.5 <= ratio < 0.75):
-                        usage_category = "Casual Gaming / Light Use"
-                        usage_emoji = "🎮"
-                    elif severity == "moderate" or (0.75 <= ratio < 0.9):
-                        usage_category = "Gaming / Balanced Setup"
-                        usage_emoji = "🎮"
-                    elif severity == "low" or ratio >= 0.9:
-                        usage_category = "High-End Gaming / Workstation"
-                        usage_emoji = "⚡"
-
-                    usage_recommendation = f"{usage_emoji} Usage Recommendation: {usage_category}"
-
-                    # try analyzer, fallback to friendly text
-                    try:
-                        if analyzer:
-                            bottleneck_text = analyzer(cpu_obj, gpu_obj)
-                        else:
-                            raise Exception("no analyzer")
-                        if not isinstance(bottleneck_text, str) or "error" in bottleneck_text.lower():
-                            raise Exception("bad analyzer result")
-                    except:
-                        cpu_name = cpu_obj.get("name", "CPU")
-                        gpu_name = gpu_obj.get("name", "GPU")
-                        gpu_vram = gpu_obj.get(
-                            "vram") or gpu_obj.get("memory") or ""
-                        gpu_power = gpu_obj.get(
-                            "power") or gpu_obj.get("tdp") or ""
-                        bottleneck_text = (
-                            f"CPU: {cpu_name}, GPU: {gpu_name}. "
-                            f"Estimated GPU capacity vs CPU performance may cause lower framerates for demanding workloads. "
-                            f"GPU specs: {('VRAM ' + str(gpu_vram)) if gpu_vram else ''}"
-                            f"{(' | ' if gpu_vram and gpu_power else '')}{('Power ' + str(gpu_power)) if gpu_power else ''}."
-                        ).strip()
-
-                    # recommendation message
-                    if severity in ("severe", "high"):
-                        reco_text = "Recommendation: upgrade the GPU for better balance, or use this pairing for office/light tasks only."
-                    else:
-                        reco_text = "Recommendation: pairing is acceptable for general use."
-
-                    # build chips
-                    results_chips = []
-                    for comp, ctype in [(cpu_obj, "cpu"), (gpu_obj, "gpu")]:
-                        results_chips.append({
-                            "id": f"{ctype}:{_slugify(comp.get('name', ''))}",
-                            "text": comp.get("name"),
-                            "price": comp.get("price"),
-                            "type": ctype,
-                            "meta": comp
-                        })
-
-                    reason = f"{severity_label}. {bottleneck_text}"
-                    text_block = (
-                        f"Compatibility Check\n\n"
-                        f"Component Pair: {cpu_obj.get('name')} + {gpu_obj.get('name')}\n"
-                        f"Result: Compatible (PCIe interface)\n\n"
-                        f"⚠ Bottleneck Analysis:\n{reason}\n\n"
-                        f"Severity: {severity.upper()} (GPU ≈ {ratio*100:.0f}% of CPU performance)\n\n"
-                        f"{usage_recommendation}\n\n"
-                        f"{reco_text}\n\n"
-                        f"Matched Components:\n"
-                    )
-                    for chip in results_chips:
-                        price_str = _format_price(
-                            chip.get("price")) or chip.get("price") or ""
-                        text_block += f"• {chip['text']}{' — ' + price_str if price_str else ''}\n"
+                    reason = f"Bottleneck analysis: GPU ≈ {ratio:.2f}x CPU performance ({severity})"
+                    text_block = f"Compatibility Check\n\nComponent Pair: {cpu_obj.get('name')} + {gpu_obj.get('name')}\nSeverity: {severity.upper()}\n{reason}\n\nMatched components:\n"
+                    for c in results_chips:
+                        text_block += f"• {c['text']}{' — ' + _format_price(c.get('price')) if c.get('price') else ''}\n"
 
                     return {
-                        "source": "local-compatibility",
+                        "source": "local-bottleneck",
                         "found": True,
                         "verdict": "compatible",
-                        "emoji_verdict": "✅",
+                        "emoji_verdict": "⚠",
                         "reason": reason,
                         "text": text_block.strip(),
                         "target": f"{cpu_obj.get('name')} + {gpu_obj.get('name')}",
@@ -1270,418 +889,425 @@ def get_compatible_components(query: str, data: dict) -> dict:
                         "compatible_type": "bottleneck_analysis",
                         "results": results_chips,
                         "chips": results_chips,
-                        "bottleneck_severity": severity,
-                        "bottleneck_ratio": float(f"{ratio:.2f}"),
-                        "usage_recommendation": {"category": usage_category, "label": usage_recommendation},
-                        "suggestions": {"for_target": results_chips, "for_other": []}
+                        "bottleneck_ratio": float(f"{ratio:.2f}")
                     }
 
-        # 2) "works with" detection & improved type/device disambiguation
-        _works_with_a = _works_with_b = None
-        for pattern in works_with_patterns:
-            m = re.search(pattern, q_lower, re.IGNORECASE)
+        # 2) "works with" style queries -> determine base and target
+        _works_a = _works_b = None
+        for pat in works_with_patterns:
+            m = re.search(pat, q_lower, re.IGNORECASE)
             if m:
-                _works_with_a = m.group(1).strip()
-                _works_with_b = m.group(2).strip().rstrip('?').strip()
+                _works_a = m.group(1).strip()
+                _works_b = m.group(2).strip()
                 break
 
+        # Utility to decide if piece-of-text looks like a type keyword (cpu/ram/gpu/storage/psu/motherboard)
         type_map = {
             "storage": "storage", "ssd": "storage", "hdd": "storage", "drive": "storage",
             "cpu": "cpu", "processor": "cpu", "apu": "cpu",
             "gpu": "gpu", "graphics": "gpu", "video": "gpu", "card": "gpu",
             "ram": "ram", "memory": "ram", "ddr": "ram",
-            "cooler": "cpu_cooler", "cpu cooler": "cpu_cooler", "cooling": "cpu_cooler",
-            "psu": "psu", "power": "psu", "supply": "psu", "power supply": "psu",
+            "psu": "psu", "power": "psu", "power supply": "psu",
             "motherboard": "motherboard", "mobo": "motherboard", "board": "motherboard",
-            "case": "case", "chassis": "case"
+            "cooler": "cpu_cooler", "coolers": "cpu_cooler"
         }
 
-        target_component_type = None
-        base_component_name = None
-
-        if _works_with_a and _works_with_b:
-            a = _works_with_a
-            b = _works_with_b
+        if _works_a and _works_b:
+            a = _works_a
+            b = _works_b
 
             def looks_like_type(s):
                 s = (s or "").lower()
-                toks = re.findall(r"[a-z0-9]+", s)
-                for t in toks:
-                    if t in type_map:
+                for tok in type_map.keys():
+                    if tok in s:
                         return True
                 return False
 
             def looks_like_device(s):
                 s = (s or "").lower()
-                brand_tokens = ["asus", "gigabyte", "msi", "amd", "intel", "ryzen",
-                                "gtx", "rtx", "radeon", "b650", "b550", "x570", "prime", "tuf"]
+                brand_tokens = ["asus", "msi", "gigabyte", "aorus",
+                                "prime", "tuf", "b550", "b650", "x570", "z790", "h610"]
                 if any(tok in s for tok in brand_tokens):
                     return True
                 if re.search(r"[a-z]*\d+[a-z]*", s):
                     return True
                 return False
 
-            try:
-                a_is_type = looks_like_type(a)
-                b_is_type = looks_like_type(b)
-                a_is_device = looks_like_device(a)
-                b_is_device = looks_like_device(b)
+            a_is_type = looks_like_type(a)
+            b_is_type = looks_like_type(b)
+            a_is_device = looks_like_device(a)
+            b_is_device = looks_like_device(b)
 
-                if a_is_type and not b_is_type:
-                    target_component_type, base_component_name = a, b
-                elif b_is_type and not a_is_type:
-                    target_component_type, base_component_name = b, a
+            # heuristics: pick base (the more device-like) and target (the type-like), else fallback to best_match
+            base_component_name = None
+            target_component_type = None
+
+            if a_is_device and not b_is_device and b_is_type:
+                base_component_name = a
+                target_component_type = type_map.get(b.split()[0], None) or b
+            elif b_is_device and not a_is_device and a_is_type:
+                base_component_name = b
+                target_component_type = type_map.get(a.split()[0], None) or a
+            else:
+                # fallback: prefer the longer phrase as base if it looks like device; else use best_match to decide
+                if a_is_device and not b_is_device:
+                    base_component_name = a
+                    target_component_type = None
+                elif b_is_device and not a_is_device:
+                    base_component_name = b
+                    target_component_type = None
                 else:
-                    if a_is_device and not b_is_device:
-                        target_component_type, base_component_name = b, a
-                    elif b_is_device and not a_is_device:
-                        target_component_type, base_component_name = a, b
+                    # when both look device-like or both look type-like, choose by length heuristic
+                    if len(a.split()) >= len(b.split()):
+                        base_component_name = a
+                        target_component_type = None
                     else:
-                        if len(a.split()) <= 2 and a_is_type:
-                            target_component_type, base_component_name = a, b
+                        base_component_name = b
+                        target_component_type = None
+
+            # find the base object from dataset (prefer motherboard search when it looks like a mobo)
+            base_obj = None
+            base_type = None
+            try:
+                if re.search(r"\b(b\d{3,4}|x\d{3,4}|prime|tuf|rog|b550|b650|x570|z790|h610)\b", base_component_name):
+                    base_obj, base_type = _best_match_in_dataset(
+                        base_component_name, {"motherboard": data.get("motherboard", {})})
+                if not base_obj:
+                    base_obj, base_type = _best_match_in_dataset(
+                        base_component_name, data)
+            except Exception:
+                base_obj = base_type = None
+
+            # if we couldn't map the target type earlier, try to infer from the phrase
+            target_type = None
+            if target_component_type:
+                # normalized mapping
+                tok = (str(target_component_type) or "").lower()
+                for k, v in type_map.items():
+                    if k in tok:
+                        target_type = v
+                        break
+            # if still unknown, try to find explicit target token in query
+            if not target_type:
+                # prefer explicit DDR mentions first
+                if "ddr5" in q_lower:
+                    target_type = "motherboard" if "motherboard" in q_lower or "mobo" in q_lower else "ram"
+                elif "ddr4" in q_lower:
+                    target_type = "motherboard" if "motherboard" in q_lower or "mobo" in q_lower else "ram"
+                else:
+                    for k, v in type_map.items():
+                        if k in q_lower:
+                            target_type = v
+                            break
+
+            # If base_obj exists and is a motherboard -> run motherboard-specific matching
+            if base_obj and base_type == "motherboard":
+                mobo = base_obj
+                mobo_socket = (mobo.get("socket") or "").lower()
+                mobo_ram_type = (mobo.get("ram_type") or "").lower()
+                results_chips = []
+                compatible_items = []
+
+                # CPU -> match by socket tokens
+                if target_type == "cpu":
+                    for k, c in (data.get("cpu") or {}).items():
+                        c_sock = (c.get("socket") or "").lower()
+                        if c_sock and mobo_socket and (c_sock in mobo_socket or mobo_socket in c_sock):
+                            compatible_items.append(c)
+                    compatible_items = _prefer_shop(compatible_items)
+
+                # RAM -> match ram_type or infer from names
+                elif target_type == "ram":
+                    for k, r in (data.get("ram") or {}).items():
+                        r_type = (r.get("ram_type") or "").lower()
+                        if not r_type:
+                            name = (r.get("name") or "").lower()
+                            if "ddr5" in name:
+                                r_type = "ddr5"
+                            elif "ddr4" in name:
+                                r_type = "ddr4"
+                        if r_type and mobo_ram_type and r_type in mobo_ram_type:
+                            compatible_items.append(r)
+                    compatible_items = _prefer_shop(compatible_items)
+
+                # Storage -> NVMe vs SATA heuristics
+                elif target_type == "storage":
+                    for sid, s in (data.get("storage") or {}).items():
+                        if CLIENT_SHOP_ID in (s.get("stores") or []):
+                            compatible_items.append(s)
+                    if not compatible_items:
+                        compatible_items = list(
+                            (data.get("storage") or {}).values())
+
+                    def _infer_interface(s):
+                        iface = (s.get("interface") or s.get(
+                            "type") or "").lower()
+                        name = (s.get("name") or "").lower()
+                        if "nvme" in iface or "m.2" in iface or "m2" in iface or "nvme" in name:
+                            return "nvme"
+                        if "sata" in iface or "sata" in name or "hdd" in name:
+                            return "sata"
+                        return "unknown"
+
+                    m2_slots = mobo.get("m2_slots") or mobo.get(
+                        "m.2_slots") or mobo.get("m2") or ""
+                    sata_ports = mobo.get(
+                        "sata_ports") or mobo.get("sata") or ""
+                    iface_notes = []
+                    if m2_slots:
+                        iface_notes.append(f"{m2_slots} x M.2 slots (NVMe)")
+                    if sata_ports:
+                        iface_notes.append(f"{sata_ports} x SATA ports")
+                    iface_text = "; ".join(
+                        iface_notes) if iface_notes else "Standard SATA & M.2 support"
+
+                    for s in compatible_items:
+                        iface = _infer_interface(s)
+                        price = s.get("price") or ""
+                        name = s.get("name") or ""
+                        gen = s.get("pcie_gen") or s.get("generation") or ""
+                        gen_text = f" ({gen})" if gen else ""
+                        if iface == "nvme":
+                            text = f"{name} — NVMe M.2{gen_text} — {iface_text}"
+                        elif iface == "sata":
+                            text = f"{name} — SATA SSD/HDD — {iface_text}"
                         else:
-                            target_component_type, base_component_name = b, a
-            except:
-                target_component_type, base_component_name = a, b
-
-        # Resolve mapped target_type and base_obj
-        if target_component_type and base_component_name:
-            normalized = target_component_type.lower().replace("-", " ").strip()
-            tokens = [t for t in re.split(r"\s+", normalized) if t]
-            mapped = None
-            for t in tokens + [normalized]:
-                if t in type_map:
-                    mapped = type_map[t]
-                    break
-            target_type = mapped or type_map.get(normalized)
-
-            if target_type and base_component_name:
-                base_obj, base_type = _best_match_in_dataset(
-                    base_component_name, data)
-                if base_obj and base_type:
-                    # ---- special case: "what gpu works with <cpu>" -> rank GPUs to CPU ----
-                    if target_type == "gpu" and base_type == "cpu":
-                        cpu_obj = base_obj
-                        cpu_cap = 0.0
-                        try:
-                            cpu_cap = estimate_cpu_capacity(cpu_obj)
-                        except:
-                            cpu_cap = float(cpu_obj.get(
-                                "cpu_score") or cpu_obj.get("score") or 0.0)
-                        cpu_cap = max(1.0, float(cpu_cap or 1.0))
-
-                        gpu_candidates = []
-                        for gid, gdata in data.get("gpu", {}).items():
-                            try:
-                                gcap = estimate_gpu_capacity(gdata)
-                            except:
-                                vram = _safe_int_from_field(
-                                    gdata.get("vram") or gdata.get("memory") or 0)
-                                power = _parse_wattage_to_int(
-                                    gdata.get("power") or gdata.get("tdp") or 0)
-                                gcap = float(
-                                    vram * 1000 + power * 2 + (gdata.get("gpu_score") or gdata.get("score") or 0))
-                            gcap = max(1.0, float(gcap or 1.0))
-                            ratio = gcap / cpu_cap
-                            closeness = 1.0 / \
-                                (1.0 + abs(math.log(max(ratio, 1e-6))))
-                            gpu_candidates.append((gdata, ratio, closeness))
-
-                        gpu_candidates.sort(key=lambda x: (-x[2], -x[1]))
-                        top = gpu_candidates[:8]
-                        results_chips = []
-                        for gdata, ratio, closeness in top:
-                            if ratio < 0.5:
-                                usage_label = "🧾 Office (Severe GPU bottleneck)"
-                            elif ratio < 0.75:
-                                usage_label = "🎮 Casual gaming (High bottleneck)"
-                            elif ratio < 0.95:
-                                usage_label = "🎮 Balanced (Moderate)"
-                            elif ratio < 1.2:
-                                usage_label = "⚡ Good (Low bottleneck)"
-                            else:
-                                usage_label = "⚡ High-end (GPU stronger than CPU)"
-
-                            results_chips.append({
-                                "id": f"gpu:{_slugify(gdata.get('name', ''))}",
-                                "text": gdata.get("name"),
-                                "price": gdata.get("price"),
-                                "type": "gpu",
-                                "meta": gdata,
-                                "match_info": {"ratio": float(f"{ratio:.2f}"), "closeness": float(f"{closeness:.2f}"), "usage_label": usage_label}
-                            })
-
-                        explanation = f"✅ COMPATIBLE\n\nBase Component (CPU): {cpu_obj.get('name')}\n\nSuggested GPU matches (ranked by match to CPU performance):"
-                        for chip in results_chips:
-                            price_str = _format_price(
-                                chip.get("price")) or chip.get("price") or ""
-                            explanation += f"\n• {chip['text']}{' — ' + price_str if price_str else ''} — {chip['match_info']['usage_label']} (GPU ≈ {chip['match_info']['ratio']*100:.0f}% of CPU perf)"
-
-                        return {
-                            "source": "local-compatibility",
-                            "found": True,
-                            "verdict": "compatible",
-                            "emoji_verdict": "✅",
-                            "reason": f"Found GPU options appropriate for {cpu_obj.get('name')}",
-                            "text": explanation,
-                            "target": cpu_obj.get("name"),
-                            "target_type": base_type,
-                            "compatible_type": "gpu_for_cpu",
-                            "results": results_chips,
-                            "chips": results_chips,
-                            "suggestions": {"for_target": results_chips, "for_other": []}
-                        }
-
-                    # ---- default motherboard-based handling and other target types ----
-                    compatible_items = []
-                    if base_type == "motherboard":
-                        if target_type == "storage":
-                            # Collect storage that has explicit interface info first (shop filter)
-                            for sid, sdata in data.get("storage", {}).items():
-                                if CLIENT_SHOP_ID in (sdata.get("stores") or []):
-                                    compatible_items.append(sdata)
-                            if not compatible_items:
-                                compatible_items = list(
-                                    data.get("storage", {}).values())
-
-                            # For storage, build per-item technical reason based on interface and name
-                            def _infer_storage_interface(item):
-                                # prefer explicit 'interface' field
-                                iface = (item.get("interface")
-                                         or item.get("type") or "").lower()
-                                name = (item.get("name") or "").lower()
-                                if iface:
-                                    if "nvme" in iface or "m.2" in iface or "m2" in iface:
-                                        return "nvme"
-                                    if "sata" in iface:
-                                        return "sata"
-                                    return iface
-                                # infer from name/desc
-                                if "nvme" in name or "m.2" in name or "m2" in name:
-                                    return "nvme"
-                                if "sata" in name or "2.5" in name or "3.5" in name or "hdd" in name:
-                                    # prefer 'hdd' -> sata, '2.5' likely SATA SSD
-                                    return "sata"
-                                # fallback to unknown
-                                return "unknown"
-
-                            # Which storage interfaces the motherboard supports (infer from mobo metadata if present)
-                            m2_info = (base_obj.get("m2_slots") or base_obj.get(
-                                "m.2_slots") or base_obj.get("m2") or "")
-                            sata_ports = base_obj.get(
-                                "sata_ports") or base_obj.get("sata") or ""
-                            # build motherboard capability text
-                            mobo_iface_notes = []
-                            if m2_info:
-                                mobo_iface_notes.append(
-                                    f"{m2_info} M.2 slot(s) (NVMe)")
-                            else:
-                                mobo_iface_notes.append(
-                                    "M.2 slots (NVMe) usually present")
-                            if sata_ports:
-                                mobo_iface_notes.append(
-                                    f"{sata_ports} SATA ports")
-                            else:
-                                mobo_iface_notes.append(
-                                    "SATA III ports available")
-                            mobo_iface_text = "; ".join(mobo_iface_notes)
-
-                            # Build results_chips with a technical_reason for each storage item
-                            results_chips = []
-                            for s in compatible_items:
-                                iface = _infer_storage_interface(s)
-                                name = s.get("name") or ""
-                                price = s.get("price") or ""
-                                # Technical reason detail
-                                if iface == "nvme":
-                                    # mention PCIe generation if available
-                                    gen = s.get("pcie_gen") or s.get(
-                                        "pci_gen") or s.get("generation") or ""
-                                    gen_text = f" ({gen})" if gen else ""
-                                    tech = f"NVMe M.2{gen_text} — uses PCIe M.2 slot; {mobo_iface_text}. NVMe drives are backward-compatible with older PCIe generations."
-                                elif iface == "sata":
-                                    tech = f"SATA III (2.5\"/3.5\") — uses motherboard SATA ports; {mobo_iface_text}."
-                                else:
-                                    tech = f"Interface unknown — check 'interface' field. {mobo_iface_text}."
-
-                                results_chips.append({
-                                    "id": f"storage:{_slugify(name)}",
-                                    "text": name,
-                                    "price": price,
-                                    "type": "storage",
-                                    "meta": s,
-                                    "technical_reason": tech
-                                })
-
-                            # sort/dedupe (keep your existing logic for price ordering)
-                            seen = set()
-                            deduped = []
-                            if callable(_parse_price_to_int):
-                                results_chips.sort(
-                                    key=lambda x: _parse_price_to_int(x.get("price", "0")))
-                            else:
-                                results_chips.sort(key=lambda x: int(
-                                    re.sub(r"[^\d]", "", str(x.get("price", "0")) or "0") or 0))
-                            for it in results_chips:
-                                n = it.get("text", "")
-                                if n and n not in seen:
-                                    seen.add(n)
-                                    deduped.append(it)
-                            results_chips = deduped[:8]
-
-                            if results_chips:
-                                explanation = f"✅ Compatible storage options for {base_obj.get('name')}\n\nMotherboard capability: {mobo_iface_text}\n\n"
-                                for chip in results_chips:
-                                    price_str = _format_price(
-                                        chip.get("price")) or chip.get("price") or ""
-                                    explanation += f"• {chip['text']}{' — ' + price_str if price_str else ''}\n  Technical: {chip.get('technical_reason')}\n"
-                                return {
-                                    "source": "local-compatibility",
-                                    "found": True,
-                                    "verdict": "compatible",
-                                    "emoji_verdict": "✅",
-                                    "reason": f"Found compatible storage options for {base_obj.get('name')}",
-                                    "text": explanation.strip(),
-                                    "target": base_obj.get("name"),
-                                    "target_type": base_type,
-                                    "compatible_type": "storage",
-                                    "results": results_chips,
-                                    "chips": results_chips,
-                                    "suggestions": {"for_target": results_chips, "for_other": []}
-                                }
-
-                            def _parse_cooler_sockets(cooler):
-                                sock_field = (cooler.get("socket") or cooler.get(
-                                    "supported_sockets") or "").lower()
-                                if sock_field:
-                                    parts = re.split(r"[,/;]+|\s+", sock_field)
-                                    return [p.strip() for p in parts if p.strip()]
-                                name = (cooler.get("name") or "").lower()
-                                inferred = []
-                                if "am5" in name:
-                                    inferred.append("am5")
-                                if "am4" in name:
-                                    inferred.append("am4")
-                                if "lga1700" in name or "1700" in name:
-                                    inferred.append("lga1700")
-                                if "lga1200" in name or "1200" in name:
-                                    inferred.append("lga1200")
-                                return inferred
-                            compatible_coolers = []
-                            for cid, cdata in data.get("cpu_cooler", {}).items():
-                                cooler_sockets = _parse_cooler_sockets(cdata)
-                                is_compatible = False
-                                if mobo_socket and cooler_sockets:
-                                    for s in cooler_sockets:
-                                        if s and (s in mobo_socket or mobo_socket in s):
-                                            is_compatible = True
-                                            break
-                                else:
-                                    if mobo_socket and mobo_socket in (cdata.get("name") or "").lower():
-                                        is_compatible = True
-                                    else:
-                                        name_lc = (cdata.get("name")
-                                                   or "").lower()
-                                        if "universal" in name_lc or cooler_sockets == []:
-                                            is_compatible = True
-                                if is_compatible:
-                                    if CLIENT_SHOP_ID in (cdata.get("stores") or []):
-                                        compatible_coolers.append(cdata)
-                            if not compatible_coolers:
-                                for cid, cdata in data.get("cpu_cooler", {}).items():
-                                    cooler_sockets = _parse_cooler_sockets(
-                                        cdata)
-                                    is_compatible = False
-                                    if mobo_socket and cooler_sockets:
-                                        for s in cooler_sockets:
-                                            if s and (s in mobo_socket or mobo_socket in s):
-                                                is_compatible = True
-                                                break
-                                    else:
-                                        if mobo_socket and mobo_socket in (cdata.get("name") or "").lower():
-                                            is_compatible = True
-                                        else:
-                                            name_lc = (
-                                                cdata.get("name") or "").lower()
-                                            if "universal" in name_lc or cooler_sockets == []:
-                                                is_compatible = True
-                                    if is_compatible:
-                                        compatible_coolers.append(cdata)
-                            compatible_items.extend(compatible_coolers)
-
-                    # dedupe/sort/limit and return similar to earlier behavior
-                    seen = set()
-                    unique_items = []
-                    for it in compatible_items:
-                        name = it.get("name", "")
-                        if name and name not in seen:
-                            seen.add(name)
-                            unique_items.append(it)
-                    if callable(_parse_price_to_int):
-                        unique_items.sort(
-                            key=lambda x: _parse_price_to_int(x.get("price", "0")))
-                    else:
-                        def _price_num(x):
-                            p = x.get("price") or ""
-                            s = re.sub(r"[^\d]", "", str(p) or "")
-                            return int(s) if s else 0
-                        unique_items.sort(key=_price_num)
-                    unique_items = unique_items[:8]
-
-                    results_chips = []
-                    for it in unique_items:
-                        price_str = _format_price(
-                            it.get("price")) or it.get("price") or ""
-                        results_chips.append({
-                            "id": f"{target_type}:{_slugify(it.get('name', ''))}",
-                            "text": it.get("name"),
-                            "price": it.get("price"),
-                            "type": target_type,
-                            "meta": it
-                        })
+                            text = f"{name} — {iface_text}"
+                        results_chips.append(
+                            {"id": f"storage:{slugify(name)}", "text": text, "price": price, "type": "storage", "meta": s})
 
                     if results_chips:
-                        display_map = {"cpu": "CPU", "motherboard": "Motherboard", "ram": "RAM",
-                                       "storage": "Storage", "gpu": "GPU", "psu": "PSU", "cpu_cooler": "CPU Cooler"}
-                        pretty = display_map.get(
-                            target_type, (target_type or "Options").upper())
-                        explanation = f"✅ COMPATIBLE\n\nBase Component: {base_obj.get('name')}\nCompatible {pretty} Options:"
-                        for chip in results_chips:
-                            price_str = _format_price(
-                                chip.get("price")) or chip.get("price") or ""
-                            explanation += f"\n• {chip['text']}{' — ' + price_str if price_str else ''}"
-
+                        explanation = f"✅ COMPATIBLE\n\nBase Component: {mobo.get('name')}\nCompatible STORAGE Options:"
+                        for chip in results_chips[:12]:
+                            explanation += f"\n• {chip['text']}{' — ' + _format_price(chip.get('price')) if chip.get('price') else ''}"
                         return {
                             "source": "local-compatibility",
                             "found": True,
                             "verdict": "compatible",
-                            "emoji_verdict": "✅",
-                            "reason": f"Found compatible {target_type} options for {base_obj.get('name')}",
+                            "reason": f"Storage compatible with {mobo.get('name')}",
                             "text": explanation,
-                            "target": base_obj.get("name"),
-                            "target_type": base_type,
-                            "compatible_type": target_type,
+                            "target": mobo.get("name"),
+                            "target_type": "motherboard",
+                            "compatible_type": "storage",
                             "results": results_chips,
-                            "chips": results_chips,
-                            "suggestions": {"for_target": results_chips, "for_other": []}
+                            "chips": results_chips
                         }
 
-        # 3) Fallback: detect a single primary component and run single-type compatibility logic
-        detection_order = [
-            ("storage", ["samsung", "evo", "nvme", "ssd", "hdd", "storage",
-             "970", "980", "m.2", "m2", "sata", "wd", "seagate", "crucial"]),
-            ("cpu_cooler", ["cooler", "fan", "cpu cooler",
-             "air cooler", "liquid cooler", "aio", "noctua", "hyper"]),
-            ("ram", ["kingston", "fury", "beast", "corsair", "gskill",
-             "ram", "memory", "ddr4", "ddr5", "16gb", "32gb"]),
-            ("gpu", ["rtx", "gtx", "radeon", "rx", "gpu", "graphics",
-             "video card", "4060", "4070", "3060", "3050"]),
-            ("psu", ["psu", "power supply", "power-supply",
-             "corsair", "seasonic", "cooler master", "watt", "80+"]),
-            ("cpu", []),
-            ("motherboard", [])
-        ]
+                # GPU -> return GPUs (PCIe universal)
+                elif target_type == "gpu":
+                    gpus = list((data.get("gpu") or {}).values())
+                    gpus = _prefer_shop(gpus) or gpus
+                    results_chips = [_chip_obj(g, "gpu") for g in gpus[:12]]
 
+                # PSU -> estimate reasonable PSUs (quick heuristic)
+                elif target_type == "psu":
+                    psus = []
+                    for pid, p in (data.get("psu") or {}).items():
+                        try:
+                            pw = _parse_psu_wattage(p)
+                        except Exception:
+                            pw = 0
+                        if pw and pw >= 450:
+                            psus.append(p)
+                    if not psus:
+                        psus = list((data.get("psu") or {}).values())
+                    psus = _prefer_shop(psus) or psus
+                    results_chips = [_chip_obj(p, "psu") for p in psus[:8]]
+
+                # CPU (explicit) -> match socket
+                elif target_type == "cpu":
+                    for cid, c in (data.get("cpu") or {}).items():
+                        c_sock = (c.get("socket") or "").lower()
+                        if c_sock and mobo.get("socket") and (c_sock in (mobo.get("socket") or "").lower() or (mobo.get("socket") or "").lower() in c_sock):
+                            compatible_items.append(c)
+                    compatible_items = _prefer_shop(
+                        compatible_items) or compatible_items
+                    results_chips = [_chip_obj(c, "cpu")
+                                     for c in compatible_items[:12]]
+
+                # fallback: return target bucket if known
+                else:
+                    if target_type and target_type in data:
+                        items = list((data.get(target_type) or {}).values())
+                        items = _prefer_shop(items) or items
+                        results_chips = [_chip_obj(i, target_type)
+                                         for i in items[:12]]
+
+                # If we built results_chips earlier (storage handled differently), return
+                if results_chips:
+                    pretty = (target_type or "component").upper()
+                    explanation = f"✅ COMPATIBLE\n\nBase Component: {mobo.get('name')}\nCompatible {pretty} Options:"
+                    for chip in results_chips[:12]:
+                        explanation += f"\n• {chip['text']}{' — ' + _format_price(chip.get('price')) if chip.get('price') else ''}"
+                    return {
+                        "source": "local-compatibility",
+                        "found": True,
+                        "verdict": "compatible",
+                        "reason": f"Found compatible {target_type} options for {mobo.get('name')}",
+                        "text": explanation,
+                        "target": mobo.get("name"),
+                        "target_type": "motherboard",
+                        "compatible_type": target_type,
+                        "results": results_chips,
+                        "chips": results_chips
+                    }
+
+            # If base_obj exists but is not motherboard, use simple mapping (e.g., user asked "What motherboards are compatible with Ryzen 5 5600X?")
+            if base_obj and base_type:
+                # Example: query "What motherboards are compatible with Ryzen 5 5600X?"
+                # If user asked for motherboards (target_type found in query) -> return motherboards that share socket/chips with base_obj
+                if target_type == "motherboard":
+                    # if base is cpu -> match mobo sockets
+                    if base_type == "cpu":
+                        cpu_sock = (base_obj.get("socket") or "").lower()
+                        mobos = []
+                        for mid, m in (data.get("motherboard") or {}).items():
+                            if cpu_sock and ((m.get("socket") or "").lower() and cpu_sock in (m.get("socket") or "").lower() or ((m.get("socket") or "").lower() in cpu_sock)):
+                                mobos.append(m)
+                        mobos = _prefer_shop(mobos) or mobos
+                        chips = [_chip_obj(m, "motherboard")
+                                 for m in mobos[:12]]
+                        if chips:
+                            text = f"✅ COMPATIBLE\n\nBase Component: {base_obj.get('name')}\nCompatible MOTHERBOARD Options:"
+                            for c in chips:
+                                text += f"\n• {c['text']}{' — ' + _format_price(c.get('price')) if c.get('price') else ''}"
+                            return {"source": "local-compatibility", "found": True, "reason": f"Found motherboards for {base_obj.get('name')}", "text": text, "target": base_obj.get('name'), "target_type": base_type, "compatible_type": "motherboard", "results": chips, "chips": chips}
+
+                            # CPU COOLER lookup: match by socket strings or supported_sockets list
+                if target_type == "cpu_cooler" or ("cpu cooler" in q_lower or "cooler" in q_lower):
+                    coolers = []
+                    for cid, cc in (data.get("cpu_cooler") or {}).items():
+                        # look for explicit supported_sockets field (list or comma string)
+                        sockets = cc.get("supported_sockets") or cc.get(
+                            "sockets") or cc.get("supported_socket")
+                        s_list = []
+                        if isinstance(sockets, (list, tuple)):
+                            s_list = [str(x).lower() for x in sockets]
+                        elif isinstance(sockets, str):
+                            s_list = [x.strip().lower() for x in re.split(
+                                r"[,\|;/]", sockets) if x.strip()]
+                        # also infer from name
+                        name_l = (cc.get("name") or "").lower()
+                        if "am4" in name_l:
+                            s_list.append("am4")
+                        if "am5" in name_l:
+                            s_list.append("am5")
+                        # if motherboard socket known, prefer coolers listing that socket
+                        m_socket = (mobo.get("socket") or "").lower(
+                        ) if 'mobo' in locals() and mobo else ""
+                        if m_socket and any(m_socket in s for s in s_list):
+                            coolers.append(cc)
+                        elif not m_socket and ("am4" in name_l or "am5" in name_l):
+                            coolers.append(cc)
+                        # also include popular universal coolers (no socket list)
+                        elif not s_list and ("universal" in name_l or "all sockets" in (cc.get("notes") or "").lower()):
+                            coolers.append(cc)
+                    coolers = _prefer_shop(coolers) or coolers
+                    chips = [_chip_obj(c, "cpu_cooler") for c in coolers[:12]]
+                    if chips:
+                        text = f"✅ COMPATIBLE\n\nCPU Cooler options that fit {mobo.get('socket') if 'mobo' in locals() and mobo else 'the requested socket'}:"
+                        for c in chips:
+                            text += f"\n• {c['text']}{' — ' + _format_price(c.get('price')) if c.get('price') else ''}"
+                        return {"source": "local-compatibility", "found": True, "reason": "Found local cpu coolers matching socket", "text": text, "target": mobo.get('name') if 'mobo' in locals() else query, "target_type": "motherboard" if 'mobo' in locals() else "query", "compatible_type": "cpu_cooler", "results": chips, "chips": chips}
+
+                        # RAM -> Motherboard: when the base is a RAM kit and user asks for motherboards (e.g. "What motherboards support DDR5 RAM?")
+                if base_type == "ram" and (target_type == "motherboard" or ("motherboard" in q_lower or "mobo" in q_lower)):
+                    ram_obj = base_obj
+                    # prefer explicit ram_type field, else infer from name
+                    r_type = (ram_obj.get("ram_type") or "").lower()
+                    r_name = (ram_obj.get("name") or "").lower()
+                    if not r_type:
+                        if "ddr5" in r_name:
+                            r_type = "ddr5"
+                        elif "ddr4" in r_name:
+                            r_type = "ddr4"
+
+                    matched_mobos = []
+                    for mid, m in (data.get("motherboard") or {}).items():
+                        m_ram = (m.get("ram_type") or "").lower()
+                        # also accept explicit boolean flags
+                        supports_ddr5 = bool(m.get("supports_ddr5") or m.get(
+                            "support_ddr5") or m.get("supports_ddr5_ram"))
+                        supports_ddr4 = bool(m.get("supports_ddr4") or m.get(
+                            "support_ddr4") or m.get("supports_ddr4_ram"))
+
+                        # normalize name inference
+                        m_name = (m.get("name") or "").lower()
+                        if not m_ram:
+                            if "ddr5" in m_name:
+                                m_ram = "ddr5"
+                            elif "ddr4" in m_name:
+                                m_ram = "ddr4"
+
+                        # Matching rules
+                        if r_type:
+                            if r_type in (m_ram or ""):
+                                matched_mobos.append(m)
+                                continue
+                            if r_type == "ddr5" and supports_ddr5:
+                                matched_mobos.append(m)
+                                continue
+                            if r_type == "ddr4" and supports_ddr4:
+                                matched_mobos.append(m)
+                                continue
+                        else:
+                            # if ram_type unknown, accept mobos that mention ddr in name
+                            if "ddr" in (m_ram or "") or "ddr" in m_name:
+                                matched_mobos.append(m)
+
+                    matched_mobos = _prefer_shop(
+                        matched_mobos) or matched_mobos
+                    chips = [_chip_obj(m, "motherboard")
+                             for m in matched_mobos[:16]]
+                    if chips:
+                        text = f"✅ COMPATIBLE\n\nBase Component: {ram_obj.get('name')}\nCompatible MOTHERBOARD Options (matching {r_type.upper() if r_type else 'DDR type'}):"
+                        for c in chips:
+                            text += f"\n• {c['text']}{' — ' + _format_price(c.get('price')) if c.get('price') else ''}"
+                        return {
+                            "source": "local-compatibility",
+                            "found": True,
+                            "verdict": "compatible",
+                            "reason": f"Found motherboards that support {r_type or 'DDR memory'}",
+                            "text": text,
+                            "target": ram_obj.get('name'),
+                            "target_type": "ram",
+                            "compatible_type": "motherboard",
+                            "results": chips,
+                            "chips": chips
+                        }
+
+                # Generic fallback: return items from the requested/most-likely bucket
+                fallback_bucket = None
+                for k in ["cpu", "motherboard", "ram", "storage", "gpu", "psu", "cpu_cooler"]:
+                    if k in q_lower:
+                        fallback_bucket = k
+                        break
+                if not fallback_bucket:
+                    # pick bucket opposite of base_type for helpfulness (cpu -> motherboard, motherboard -> cpu, ram -> motherboard)
+                    mapping = {"cpu": "motherboard", "motherboard": "cpu",
+                               "ram": "motherboard", "storage": "motherboard"}
+                    fallback_bucket = mapping.get(base_type, "cpu")
+                items = list((data.get(fallback_bucket) or {}).values())[:12]
+                items = _prefer_shop(items) or items
+                chips = [_chip_obj(i, fallback_bucket) for i in items]
+                if chips:
+                    return {"source": "local-compatibility", "found": True, "reason": f"Found {fallback_bucket} options related to {base_obj.get('name')}", "text": f"Compatible {fallback_bucket} options for {base_obj.get('name')}", "target": base_obj.get('name'), "target_type": base_type, "compatible_type": fallback_bucket, "results": chips, "chips": chips}
+
+        # 3) Fallback: user gave a single component: attempt to detect its type and return useful related items
+        # detection order similar to original
+        detection_order = [
+            ("storage", ["samsung", "evo", "nvme", "ssd", "hdd", "970",
+             "980", "m.2", "m2", "sata", "wd", "seagate", "crucial"]),
+            ("ram", ["ddr4", "ddr5", "ram", "memory",
+             "gskill", "corsair", "kingston"]),
+            ("gpu", ["rtx", "gtx", "radeon", "rx",
+             "gpu", "4060", "4070", "3060"]),
+            ("psu", ["psu", "power supply", "watt", "80+"]),
+            ("cpu", ["ryzen", "intel", "i5",
+             "i7", "i9", "5600", "5800", "7600"]),
+            ("motherboard", ["b550", "b650", "x570",
+             "z790", "h610", "prime", "tuf", "rog"])
+        ]
         primary_component = None
         primary_type = None
         for ptype, keywords in detection_order:
@@ -1694,7 +1320,8 @@ def get_compatible_components(query: str, data: dict) -> dict:
                     break
 
         if not primary_component:
-            for comp_type in ["storage", "cpu_cooler", "ram", "gpu", "psu", "cpu", "motherboard"]:
+            # last-resort: try all buckets
+            for comp_type in ["cpu", "motherboard", "ram", "storage", "gpu", "psu", "cpu_cooler"]:
                 obj, typ = _best_match_in_dataset(
                     q_lower, {comp_type: data.get(comp_type, {})})
                 if obj:
@@ -1703,368 +1330,58 @@ def get_compatible_components(query: str, data: dict) -> dict:
                     break
 
         if not primary_component:
-            return {"found": False, "message": "Could not identify a specific component. Please mention component names clearly.", "suggestions": []}
+            return {"found": False, "message": "Could not identify a component. Please name the component (e.g., 'ASUS TUF GAMING B550-PLUS')."}
 
-        # Single-component compatibility logic (same as earlier)
-        results_chips = []
-        compatible_items = []
-        verdict = "❓ UNKNOWN COMPATIBILITY"
-        reason = "Could not determine compatibility"
-        primary_name = primary_component.get("name", "")
-        compatible_type = None
+        # If primary is motherboard -> suggest CPUs (socket), RAM (ram_type), storage notes
+        if primary_type == "motherboard":
+            m = primary_component
+            m_sock = (m.get("socket") or "").lower()
+            m_ram = (m.get("ram_type") or "").lower()
+            # CPUs
+            cpu_list = []
+            for k, c in (data.get("cpu") or {}).items():
+                csock = (c.get("socket") or "").lower()
+                if csock and m_sock and (csock in m_sock or m_sock in csock):
+                    cpu_list.append(c)
+            cpu_list = _prefer_shop(cpu_list) or cpu_list
+            chips = [_chip_obj(c, "cpu") for c in cpu_list[:12]]
+            if chips:
+                text = f"✅ COMPATIBLE\n\nBase Component: {m.get('name')}\nCompatible CPU Options:"
+                for c in chips:
+                    text += f"\n• {c['text']}{' — ' + _format_price(c.get('price')) if c.get('price') else ''}"
+                return {"source": "local-compatibility", "found": True, "reason": f"Found CPUs for {m.get('name')}", "text": text, "target": m.get('name'), "target_type": "motherboard", "compatible_type": "cpu", "results": chips, "chips": chips}
 
-        # CPU -> Motherboards
+        # If primary is cpu -> suggest motherboards
         if primary_type == "cpu":
-            cpu_socket = (primary_component.get("socket") or "").lower()
-            if not cpu_socket:
-                return {"found": False, "message": f"No socket information found for {primary_name}.", "suggestions": []}
-            for mid, mdata in data.get("motherboard", {}).items():
-                mobo_socket = (mdata.get("socket") or "").lower()
-                if cpu_socket and mobo_socket and (cpu_socket in mobo_socket or mobo_socket in cpu_socket):
-                    if CLIENT_SHOP_ID in (mdata.get("stores") or []):
-                        compatible_items.append(mdata)
-            if not compatible_items:
-                for mid, mdata in data.get("motherboard", {}).items():
-                    mobo_socket = (mdata.get("socket") or "").lower()
-                    if cpu_socket and mobo_socket and (cpu_socket in mobo_socket or mobo_socket in cpu_socket):
-                        compatible_items.append(mdata)
-            # dedupe & sort
-            seen = set()
-            unique = []
-            for m in compatible_items:
-                n = m.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(m)
-            if callable(_parse_price_to_int):
-                unique.sort(key=lambda x: _parse_price_to_int(
-                    x.get("price", "0")))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for m in unique:
-                results_chips.append({"id": f"motherboard:{_slugify(m.get('name', ''))}", "text": m.get(
-                    "name"), "price": m.get("price"), "type": "motherboard", "meta": m})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            reason = f"Socket match: {cpu_socket.upper()}" if results_chips else f"No compatible motherboards found for {cpu_socket.upper()} socket"
-            compatible_type = "motherboard"
+            cpu = primary_component
+            cpu_sock = (cpu.get("socket") or "").lower()
+            mobos = []
+            for k, m in (data.get("motherboard") or {}).items():
+                msock = (m.get("socket") or "").lower()
+                if msock and cpu_sock and (msock in cpu_sock or cpu_sock in msock):
+                    mobos.append(m)
+            mobos = _prefer_shop(mobos) or mobos
+            chips = [_chip_obj(m, "motherboard") for m in mobos[:12]]
+            if chips:
+                text = f"✅ COMPATIBLE\n\nBase Component: {cpu.get('name')}\nCompatible Motherboard Options:"
+                for c in chips:
+                    text += f"\n• {c['text']}{' — ' + _format_price(c.get('price')) if c.get('price') else ''}"
+                return {"source": "local-compatibility", "found": True, "reason": f"Found motherboards for {cpu.get('name')}", "text": text, "target": cpu.get('name'), "target_type": "cpu", "compatible_type": "motherboard", "results": chips, "chips": chips}
 
-        # Motherboard -> CPUs
-        elif primary_type == "motherboard":
-            mobo_socket = (primary_component.get("socket") or "").lower()
-            if not mobo_socket:
-                return {"found": False, "message": f"No socket information found for {primary_name}.", "suggestions": []}
-            for cid, cdata in data.get("cpu", {}).items():
-                cpu_socket = (cdata.get("socket") or "").lower()
-                if mobo_socket and cpu_socket and (mobo_socket in cpu_socket or cpu_socket in mobo_socket):
-                    if CLIENT_SHOP_ID in (cdata.get("stores") or []):
-                        compatible_items.append(cdata)
-            if not compatible_items:
-                for cid, cdata in data.get("cpu", {}).items():
-                    cpu_socket = (cdata.get("socket") or "").lower()
-                    if mobo_socket and cpu_socket and (mobo_socket in cpu_socket or cpu_socket in mobo_socket):
-                        compatible_items.append(cdata)
-            seen = set()
-            unique = []
-            for c in compatible_items:
-                n = c.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(c)
-            if callable(_parse_price_to_int):
-                unique.sort(key=lambda x: _parse_price_to_int(
-                    x.get("price", "0")))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for c in unique:
-                results_chips.append({"id": f"cpu:{_slugify(c.get('name', ''))}", "text": c.get(
-                    "name"), "price": c.get("price"), "type": "cpu", "meta": c})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            reason = f"Socket match: {mobo_socket.upper()}" if results_chips else f"No compatible CPUs found for {mobo_socket.upper()} socket"
-            compatible_type = "cpu"
+        # else: return a helpful generic list from the bucket of the detected primary_type
+        bucket = primary_type or "cpu"
+        items = list((data.get(bucket) or {}).values())[:12]
+        items = _prefer_shop(items) or items
+        chips = [_chip_obj(i, bucket) for i in items]
+        if chips:
+            return {"source": "local-compatibility", "found": True, "reason": f"Found {bucket} options related to query", "text": f"Options for {primary_component.get('name')}", "target": primary_component.get('name'), "target_type": primary_type, "compatible_type": bucket, "results": chips, "chips": chips}
 
-        # RAM -> Motherboards
-        elif primary_type == "ram":
-            ram_type = (primary_component.get("ram_type") or "").lower()
-            ram_name = (primary_component.get("name") or "").lower()
-            if not ram_type:
-                if "ddr5" in ram_name:
-                    ram_type = "ddr5"
-                elif "ddr4" in ram_name:
-                    ram_type = "ddr4"
-                else:
-                    ram_type = "ddr4"
-            for mid, mdata in data.get("motherboard", {}).items():
-                mobo_ram = (mdata.get("ram_type") or "").lower()
-                mobo_name = (mdata.get("name") or "").lower()
-                is_compatible = False
-                if ram_type and mobo_ram:
-                    is_compatible = ram_type in mobo_ram or mobo_ram in ram_type
-                elif ram_type:
-                    is_compatible = ram_type in mobo_name
-                else:
-                    is_compatible = True
-                if is_compatible:
-                    if CLIENT_SHOP_ID in (mdata.get("stores") or []):
-                        compatible_items.append(mdata)
-            if not compatible_items:
-                for mid, mdata in data.get("motherboard", {}).items():
-                    mobo_ram = (mdata.get("ram_type") or "").lower()
-                    mobo_name = (mdata.get("name") or "").lower()
-                    is_compatible = False
-                    if ram_type and mobo_ram:
-                        is_compatible = ram_type in mobo_ram or mobo_ram in ram_type
-                    elif ram_type:
-                        is_compatible = ram_type in mobo_name
-                    else:
-                        is_compatible = True
-                    if is_compatible:
-                        compatible_items.append(mdata)
-            seen = set()
-            unique = []
-            for m in compatible_items:
-                n = m.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(m)
-            if callable(_parse_price_to_int):
-                unique.sort(key=lambda x: _parse_price_to_int(
-                    x.get("price", "0")))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for m in unique:
-                results_chips.append({"id": f"motherboard:{_slugify(m.get('name', ''))}", "text": m.get(
-                    "name"), "price": m.get("price"), "type": "motherboard", "meta": m})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            reason = f"RAM type: {ram_type.upper()}" if results_chips else f"No compatible motherboards found for {ram_type.upper()} RAM"
-            compatible_type = "motherboard"
-
-        # GPU -> PSU
-        elif primary_type == "gpu":
-            gpu_power = _parse_wattage_to_int(
-                primary_component.get("power", "0"))
-            for pid, pdata in data.get("psu", {}).items():
-                pw = (_parse_psu_wattage(pdata) if callable(
-                    _parse_psu_wattage) else _parse_psu_wattage_local(pdata))
-                required = max(gpu_power + 200, 550)
-                if pw >= required:
-                    if CLIENT_SHOP_ID in (pdata.get("stores") or []):
-                        compatible_items.append(pdata)
-            if not compatible_items:
-                for pid, pdata in data.get("psu", {}).items():
-                    pw = (_parse_psu_wattage(pdata) if callable(
-                        _parse_psu_wattage) else _parse_psu_wattage_local(pdata))
-                    required = max(gpu_power + 200, 550)
-                    if pw >= required:
-                        compatible_items.append(pdata)
-            seen = set()
-            unique = []
-            for p in compatible_items:
-                n = p.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(p)
-            if callable(_parse_psu_wattage):
-                unique.sort(key=lambda x: _parse_psu_wattage(x))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for p in unique:
-                watt = (_parse_psu_wattage(p) if callable(
-                    _parse_psu_wattage) else _parse_psu_wattage_local(p))
-                results_chips.append({"id": f"psu:{_slugify(p.get('name', ''))}", "text": f"{p.get('name')} — {watt}W" if watt else p.get(
-                    "name"), "price": p.get("price"), "type": "psu", "meta": p})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            reason = f"Power requirement: {gpu_power}W + headroom" if results_chips else f"No compatible PSUs found for {gpu_power}W GPU"
-            compatible_type = "psu"
-
-        # Storage -> Motherboards
-        elif primary_type == "storage":
-            storage_name = (primary_component.get("name") or "").lower()
-            storage_interface = (
-                primary_component.get("interface") or "").lower()
-            if not storage_interface:
-                if "nvme" in storage_name or "m.2" in storage_name or "m2" in storage_name:
-                    storage_interface = "nvme"
-                elif "sata" in storage_name:
-                    storage_interface = "sata"
-                else:
-                    storage_interface = "both"
-            compatible_mobos = []
-            for mid, mdata in data.get("motherboard", {}).items():
-                if CLIENT_SHOP_ID in (mdata.get("stores") or []):
-                    compatible_mobos.append(mdata)
-            if not compatible_mobos:
-                compatible_mobos = list(data.get("motherboard", {}).values())
-            seen = set()
-            unique = []
-            for m in compatible_mobos:
-                n = m.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(m)
-            if callable(_parse_price_to_int):
-                unique.sort(key=lambda x: _parse_price_to_int(
-                    x.get("price", "0")))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for m in unique:
-                results_chips.append({"id": f"motherboard:{_slugify(m.get('name', ''))}", "text": m.get(
-                    "name"), "price": m.get("price"), "type": "motherboard", "meta": m})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            nvme_note = "NVMe (PCIe 3.0/4.0 support depends on motherboard/CPU)" if "nvme" in storage_interface else (
-                storage_interface.upper() if storage_interface else "Interface")
-            reason = f"Interface: {nvme_note} — generally compatible with modern motherboards" if results_chips else f"No compatible motherboards found"
-            compatible_type = "motherboard"
-
-        # CPU Cooler -> CPUs
-        elif primary_type == "cpu_cooler":
-            cooler_socket = (primary_component.get("socket") or "").lower()
-            cooler_name = (primary_component.get("name") or "").lower()
-            supported_sockets = []
-            if cooler_socket:
-                supported_sockets = [s.strip().lower() for s in re.split(
-                    r"[,/;]+|\s+", cooler_socket) if s.strip()]
-            else:
-                if "am5" in cooler_name or "universal" in cooler_name:
-                    supported_sockets = ["am5", "am4", "lga1700"]
-                elif "am4" in cooler_name:
-                    supported_sockets = ["am4"]
-                else:
-                    supported_sockets = ["am4", "am5", "lga1700"]
-            for cid, cdata in data.get("cpu", {}).items():
-                cpu_socket = (cdata.get("socket") or "").lower()
-                if cpu_socket and any(socket in cpu_socket for socket in supported_sockets):
-                    if CLIENT_SHOP_ID in (cdata.get("stores") or []):
-                        compatible_items.append(cdata)
-            if not compatible_items:
-                for cid, cdata in data.get("cpu", {}).items():
-                    cpu_socket = (cdata.get("socket") or "").lower()
-                    if cpu_socket and any(socket in cpu_socket for socket in supported_sockets):
-                        compatible_items.append(cdata)
-            seen = set()
-            unique = []
-            for c in compatible_items:
-                n = c.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(c)
-            if callable(_parse_price_to_int):
-                unique.sort(key=lambda x: _parse_price_to_int(
-                    x.get("price", "0")))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for c in unique:
-                results_chips.append({"id": f"cpu:{_slugify(c.get('name', ''))}", "text": c.get(
-                    "name"), "price": c.get("price"), "type": "cpu", "meta": c})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            socket_list = ", ".join([s.upper() for s in supported_sockets])
-            reason = f"Socket support: {socket_list}" if results_chips else f"No compatible CPUs found for this cooler"
-            compatible_type = "cpu"
-
-        elif primary_type == "psu":
-            psu_wattage = (_parse_psu_wattage(primary_component) if callable(
-                _parse_psu_wattage) else _parse_psu_wattage_local(primary_component))
-            for gid, gdata in data.get("gpu", {}).items():
-                gpu_power = _parse_wattage_to_int(gdata.get("power", "0"))
-                required = max(gpu_power + 200, 550)
-                if psu_wattage >= required:
-                    if CLIENT_SHOP_ID in (gdata.get("stores") or []):
-                        compatible_items.append(gdata)
-            if not compatible_items:
-                for gid, gdata in data.get("gpu", {}).items():
-                    gpu_power = _parse_wattage_to_int(gdata.get("power", "0"))
-                    required = max(gpu_power + 200, 550)
-                    if psu_wattage >= required:
-                        compatible_items.append(gdata)
-            seen = set()
-            unique = []
-            for g in compatible_items:
-                n = g.get("name", "")
-                if n and n not in seen:
-                    seen.add(n)
-                    unique.append(g)
-            if callable(_parse_price_to_int):
-                unique.sort(key=lambda x: _parse_price_to_int(
-                    x.get("price", "0")))
-            else:
-                unique.sort(key=lambda x: _parse_price_to_int_local(
-                    x.get("price", "0")))
-            unique = unique[:8]
-            for g in unique:
-                results_chips.append({"id": f"gpu:{_slugify(g.get('name', ''))}", "text": g.get(
-                    "name"), "price": g.get("price"), "type": "gpu", "meta": g})
-            verdict = "✅ COMPATIBLE" if results_chips else "❌ NOT COMPATIBLE"
-            reason = f"PSU wattage: {psu_wattage}W" if results_chips else f"No compatible GPUs found for {psu_wattage}W PSU"
-            compatible_type = "gpu"
-
-        # Final explanation
-        explanation_lines = []
-        explanation_lines.append(verdict)
-        matched_display = primary_component.get(
-            "name") or primary_name or "Unknown"
-        matched_note = ""
-        if q_lower and matched_display and q_lower not in matched_display.lower():
-            matched_note = f" (best match for your query: {matched_display})"
-        explanation_lines.append(f"Component: {matched_display}{matched_note}")
-        explanation_lines.append(f"Technical Check: {reason}")
-
-        if results_chips:
-            explanation_lines.append("")
-            display_map = {"cpu": "CPU", "motherboard": "Motherboard", "ram": "RAM",
-                           "storage": "Storage", "gpu": "GPU", "psu": "PSU", "cpu_cooler": "CPU Cooler"}
-            pretty = display_map.get(
-                compatible_type, (compatible_type or "Options").upper())
-            explanation_lines.append(f"✅ Compatible {pretty} Options:")
-            for chip in results_chips:
-                price_str = _format_price(
-                    chip.get("price")) or chip.get("price", "")
-                explanation_lines.append(
-                    f"• {chip['text']}{' — ' + price_str if price_str else ''}")
-
-        explanation = "\n".join(explanation_lines)
-
-        if not compatible_type:
-            compatible_type = {"storage": "motherboard", "gpu": "psu", "cpu": "motherboard", "motherboard": "cpu",
-                               "ram": "motherboard", "cpu_cooler": "cpu", "psu": "gpu"}.get(primary_type, "component")
-
-        try:
-            print(
-                f"INFO:COMPATIBILITY RESULT: {primary_type}->{compatible_type}, found={bool(results_chips)}")
-        except:
-            pass
-
-        return {
-            "source": "local-compatibility",
-            "found": bool(results_chips),
-            "verdict": "compatible" if "✅" in verdict else "incompatible",
-            "emoji_verdict": "✅" if "✅" in verdict else "❌",
-            "reason": reason,
-            "text": explanation,
-            "target": primary_name,
-            "target_type": primary_type,
-            "compatible_type": compatible_type,
-            "results": results_chips,
-            "chips": results_chips,
-            "suggestions": {"for_target": results_chips, "for_other": []},
-            "matched_id": primary_component.get("id") if primary_component else None,
-            "confidence": 1.0 if (q_lower and primary_component and q_lower in primary_component.get("name", "").lower()) else 0.85
-        }
+        return {"found": False, "message": "No compatible items found."}
 
     except Exception as e:
         try:
-            print("ERROR: get_compatible_components failed:", str(e))
-        except:
+            logger.exception("ERROR: get_compatible_components failed: %s", e)
+        except Exception:
             pass
         return {"found": False, "error": str(e), "message": "Compatibility check failed. Please try again with specific component names."}
 
