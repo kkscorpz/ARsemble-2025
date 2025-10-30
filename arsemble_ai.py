@@ -1393,167 +1393,130 @@ def get_compatible_components(query: str, data: dict) -> dict:
 # --------------------------
 
 
-def gemini_fallback_with_data(user_input: str, context_data: dict, chat_history: List[Dict] = None) -> str:
+def gemini_fallback_with_data(user_input: str, context_data: dict, chat_history: list = None) -> str:
     """
-    Gemini fallback tuned for concise, casual+academic tone and PH-currency/range rules.
-    Replaces previous implementation and includes 2025 latest+older components handling.
+    Gemini fallback for PC-building assistant — clean, concise, casual+academic tone.
+    Behavior:
+      - For "learning/explain" queries: call Gemini (gemini-2.5-flash) with an explicit prompt instructing
+        an academic + casual tone. If Gemini fails, return a minimal user-facing fallback message.
+      - For latest/components/bottleneck/compat/specs queries: deterministic local responses as before.
+      - Always returns a string; exceptions are logged and a safe error string is returned.
+    Note: Requires an authenticated `client` object with `client.models.generate_content`.
     """
+    logger.info("Running gemini_fallback_with_data for query: %s", user_input)
     try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-
-        # safe context snippet (trim to keep prompt small)
-        try:
-            context_snippet = json.dumps(context_data or {}, indent=2)[:3000]
-        except Exception:
-            context_snippet = "{}"
-
         user_lower = (user_input or "").lower()
 
-        # Detect bottleneck-specific queries
-        is_bottleneck_q = bool(re.search(
-            r"\bbottleneck\b|\bwill .* bottleneck\b|\bbetween\b.*\b(and|vs|vs\.)\b", user_lower))
+        # --- Query type detection (improved) ---
+        is_bottleneck_q = bool(
+            re.search(r"\bbottleneck\b|\bbetween\b.*\b(and|vs|vs\.)\b", user_lower))
+        is_time_keyword = bool(re.search(
+            r"\b(latest|newest|recent|recently|current|today|yesterday|now|news|update|updates|announced|released|just announced)\b",
+            user_lower))
+        is_latest_hardware_q = bool(re.search(
+            r"\b(cpu|gpu|processor|graphics card|graphics)\b", user_lower)) and is_time_keyword
+        is_latest_components_q = bool(re.search(
+            r"\b(ram|ddr5|ddr4|nvme|ssd|hdd|cpu cooler|psu|power supply|case|fan|motherboard|mobo|storage)\b",
+            user_lower)) and is_time_keyword
+        is_compat_q = bool(
+            re.search(r"\bcompatible\b|\bworks with\b|\bfit\b|\bsupport\b", user_lower))
+        is_specs_build_q = any(k in user_lower for k in [
+                               "details", "specs", "show me", "how much", "price", "cost", "build", "recommend", "pc build"])
+        is_general_q = not any([is_bottleneck_q, is_latest_hardware_q,
+                               is_latest_components_q, is_compat_q, is_specs_build_q])
 
-        # Shared base instructions (no greetings, concise, avoid forbidden phrases)
-        base = (
-            "You are ARIA — a concise, factual PC-building assistant. "
-            "Reply in a casual-but-academic tone (no greetings). "
-            "Do NOT use phrases like 'dataset', 'I don't have information', 'not in my dataset', or 'as of my last update'. "
-            "If uncertain, give a brief likely answer and a practical check the user can perform."
-            "KEEP RESPONSES CONCISE - MAX 10-12 LINES TOTAL."
-        )
+        # --- learning / "what is" detection (route to Gemini; minimal fallback) ---
+        # --- learning / "what is" detection (route to Gemini; minimal fallback) ---
+        is_learning_q = bool(re.search(
+            r"\b(what is|what does|explain|define|describe|learn|about learning|meaning of|how does)\b",
+            user_lower
+        ))
+        topics_mentioned = bool(re.search(
+            r"\b(pcie|socket|form ?factor|tdp|cores?|threads?|nvme|m\.?2|sata|ram|ddr\d?|xmp|vrm|psu|bios|uefi|overclock|bottleneck|bandwidth|latency|vram|gpu memory)\b",
+            user_lower.replace("/", " "), flags=re.IGNORECASE
+        ))
 
-        # Pricing rules (enforced everywhere)
-        price_instructions = (
-            "\n\nIMPORTANT PRICING RULES (MUST FOLLOW):\n"
-            "- If you mention prices, ALWAYS use Philippine peso and the ₱ symbol (e.g., ₱4,000). Do NOT use $ or USD.\n"
-            "- When giving prices, provide only approximate ranges (e.g., ₱4,000–₱6,000). Do NOT output a precise single client price.\n"
-            "- Round to the nearest 100 or 500 and keep ranges short (example: ₱4,500–₱6,000).\n"
-            "- If you are unsure about local pricing, say 'Check local retailers for current pricing' (but still give a short rounded range).\n"
-        )
-
-        # --- Detect latest CPU/GPU hardware queries (existing) ---
-        is_latest_hardware_query = bool(
-            re.search(r"\b(latest|newest|current|recent|what's new|just released|new release)\b.*\b(cpu|gpu|processor|graphics card|video card|hardware)\b", user_lower, re.IGNORECASE)
-        )
-
-        # --- NEW: detect latest and older components (RAM, NVMe, SSD, coolers, PSU, cases, fans) ---
-        is_latest_components_query = bool(
-            re.search(
-                r"\b(ram|memory|ddr5|ddr4|nvme|m\.2|ssd|sata|storage|cpu cooler|cooler|aio|all-in-one|air cooler|psu|power supply|power unit|case|chassis|fan|heatsink|thermal paste|cables)\b",
-                user_lower,
-                re.IGNORECASE,
-            )
-        )
-
-        # --- Handle explicit latest hardware (CPU/GPU) requests first (keeps previous behavior) ---
-        if is_latest_hardware_query:
-            is_specifically_2025 = "2025" in user_lower
-            if is_specifically_2025:
-                latest_hardware_prompt = (
-                    base + "\n\n"
-                    "CRITICAL: It is now 2025. Provide CURRENT 2025 hardware info. KEEP RESPONSE VERY CONCISE - MAX 10 LINES.\n\n"
-                    f"User asked: {user_input}\n\n"
-                    "Provide ONLY this concise 2025 hardware info:\n\n"
-                    "2025 Latest GPUs:\n"
-                    "• NVIDIA RTX 50 Series (Blackwell): RTX 5090/5080/5070/5060\n"
-                    "• AMD RX 8000 Series (RDNA 4): RX 8900 XTX/8800 XT/8700 XT/8600 XT\n"
-                    "• Intel Arc Battlemage: B880/B780/B580\n\n"
-                    "2025 Latest CPUs:\n"
-                    "• Intel Core Ultra 200 Series (Arrow Lake)\n"
-                    "• AMD Ryzen 8000 Series (Zen 5)\n\n"
-                    "Pricing: ₱25K–₱180K (GPUs), ₱12K–₱50K (CPUs)\n"
-                    "Check local retailers for exact pricing."
-                )
-            else:
-                latest_hardware_prompt = (
-                    base + "\n\n"
-                    f"User asked: {user_input}\n\n"
-                    "Provide ONLY this concise current hardware info:\n\n"
-                    "Current Latest GPUs:\n"
-                    "• NVIDIA RTX 40 Series: RTX 4090/4080 SUPER/4070 SUPER/4060\n"
-                    "• AMD RX 7000 Series: RX 7900 XTX/7900 XT/7800 XT/7700 XT\n"
-                    "• Intel Arc A-Series: A770/A750/A580\n\n"
-                    "Current Latest CPUs:\n"
-                    "• Intel Core 14th Gen: i9-14900K/i7-14700K/i5-14600K\n"
-                    "• AMD Ryzen 7000 Series: 7950X3D/7800X3D/7600X\n\n"
-                    "Pricing: ₱18K–₱120K (GPUs), ₱10K–₱40K (CPUs)\n"
-                    "Check local retailers for exact pricing."
-                )
-
-            try:
-                response = model.generate_content(latest_hardware_prompt)
-                raw = getattr(response, "text", None) or str(response)
-                clean = raw.strip()
-                # Clean up markdown/unwanted formatting
-                clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean)
-                clean = re.sub(r'\*(.*?)\*', r'\1', clean)
-                clean = re.sub(
-                    r'^(hi|hello|hey)[\s,\!\.]+', '', clean, flags=re.IGNORECASE)
-                return clean
-            except Exception:
-                logger.exception("Gemini latest hardware call failed.")
-                if is_specifically_2025:
-                    return ("2025 Latest GPUs:\n"
-                            "• NVIDIA RTX 50 Series: 5090/5080/5070/5060\n"
-                            "• AMD RX 8000 Series: 8900 XTX/8800 XT/8700 XT/8600 XT\n"
-                            "• Intel Arc Battlemage: B880/B780/B580\n\n"
-                            "Pricing: ₱25K–₱180K\n"
-                            "Check local retailers for exact pricing.")
-                else:
-                    return ("Current Latest GPUs:\n"
-                            "• NVIDIA RTX 40 Series: 4090/4080 SUPER/4070 SUPER/4060\n"
-                            "• AMD RX 7000 Series: 7900 XTX/7900 XT/7800 XT/7700 XT\n"
-                            "• Intel Arc A-Series: A770/A750/A580\n\n"
-                            "Pricing: ₱18K–₱120K\n"
-                            "Check local retailers for exact pricing.")
-
-        # --- Handle latest components queries (2025 latest + older generations) ---
-        if is_latest_components_query:
-            components_prompt = (
-                base + "\n\n"
-                "CRITICAL: Provide both the LATEST (2025) and OLDER mainstream PC components (RAM, storage, NVMe, CPU coolers, PSUs, cases). "
-                "Focus on desktop parts, mention generation/year where relevant, and show price ranges in ₱ (Philippine peso). "
-                "Keep response concise — MAX 12 LINES.\n\n"
-                f"User asked: {user_input}\n\n"
-                "2025 Latest Components:\n"
-                "• RAM: DDR5 kits 6400–9600 MT/s (32–64 GB). High-end G.Skill Trident Z5, Corsair Dominator Titanium — ₱5,000–₱18,000.\n"
-                "• Storage (NVMe Gen5): Samsung 990 Pro Gen5, Crucial T705 — up to 14 GB/s, ₱8,000–₱28,000.\n"
-                "• NVMe Gen4: Solidigm P44 Pro, WD SN850X — ₱3,500–₱10,000.\n"
-                "• SATA SSD: Crucial MX500, Kingston A400 — ₱1,500–₱4,000.\n"
-                "• CPU Coolers: DeepCool LS720, Arctic Liquid Freezer III 360 AIO, or Noctua NH-U12A air — ₱3,000–₱12,000.\n"
-                "• PSU: 80+ Gold/Platinum ATX 3.1 (PCIe 5.1 ready), 750–1000 W — ₱4,500–₱13,000.\n"
-                "• Cases/Fans: Lian Li O11 Vision, Fractal North, NZXT H7 Flow — ₱3,000–₱9,000.\n\n"
-                "Older Mainstream Components (2019–2022):\n"
-                "• RAM: DDR4 3200–4000 MT/s (Corsair Vengeance LPX, HyperX Fury) — ₱2,500–₱6,000.\n"
-                "• Storage: NVMe Gen3 (WD SN570, Samsung 970 EVO) — ₱2,000–₱6,000.\n"
-                "• CPU Coolers: Cooler Master Hyper 212, DeepCool Gammaxx 400 — ₱1,000–₱3,000.\n"
-                "• PSU: Bronze-rated 550–750 W (Seasonic S12III, Cooler Master MWE) — ₱2,000–₱4,000.\n"
-                "• Cases: NZXT H510, Cooler Master NR400, Tecware Nexus — ₱2,000–₱4,000.\n\n"
-                "Check local retailers for actual current pricing."
+        if is_learning_q and topics_mentioned:
+            prompt = (
+                f"User question: {user_input.strip()}\n\n"
+                "Instruction: Explain the PC hardware concept clearly and accurately in 5–6 sentences only. "
+                "Use an academic but casual tone that beginners can understand. "
+                "Include one simple example and one short practical tip. Avoid long paragraphs, jargon, and do not use any asterisks or bullet points. "
+                "Write it in smooth, natural sentences only."
             )
 
             try:
-                response = model.generate_content(components_prompt)
-                raw = getattr(response, "text", None) or str(response)
-                clean = raw.strip()
-                clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean)
-                clean = re.sub(r'\*(.*?)\*', r'\1', clean)
-                clean = re.sub(
-                    r'^(hi|hello|hey)[\s,\!\.]+', '', clean, flags=re.IGNORECASE)
-                return clean
-            except Exception:
-                logger.exception("Gemini latest components call failed.")
-                return (
-                    "2025 Components Overview:\n"
-                    "• RAM: DDR5 6400–9600 MT/s — ₱5,000–₱18,000 | Older: DDR4 3200–4000 MT/s — ₱2,500–₱6,000.\n"
-                    "• NVMe Gen5 (Samsung 990 Pro G5, Crucial T705) — ₱8,000–₱28,000 | Older Gen3 NVMe — ₱2,000–₱6,000.\n"
-                    "• Coolers: 360 mm AIOs or Noctua NH-U12A — ₱3,000–₱12,000 | Older Hyper 212 — ₱1,000–₱3,000.\n"
-                    "• PSU: 80+ Gold 750–1000 W — ₱4,500–₱13,000 | Older Bronze 550–750 W — ₱2,000–₱4,000.\n"
-                    "• Cases: Lian Li O11 Vision / NZXT H7 Flow — ₱3,000–₱9,000 | Older NZXT H510 / Tecware Nexus — ₱2,000–₱4,000.\n"
-                    "Check local stores for updated PH prices."
-                )
+                gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+                gemini_resp = gemini_model.generate_content(prompt)
 
-        # --- Bottleneck flow ---
+                if gemini_resp and hasattr(gemini_resp, "text"):
+                    return gemini_resp.text.strip()
+            except Exception:
+                logger.exception("Gemini call failed for learning query.")
+
+            return "Sorry — the detailed explainer is temporarily unavailable. Try again in a moment or ask for one short term to explain."
+
+        # --- Recommend / "best X for Y" detection (route to Gemini) ---
+        recommend_match = re.search(
+            r"\b(?:best|recommend(?:ed)?|top)\b(?: the)?\s*(?P<comp>motherboard|mobo|cpu|gpu|graphics card|ram|memory|ssd|nvme|psu|power supply|case|cooler|cpu cooler|fan|storage)\b(?:.*\bfor\b\s*(?P<use>.+))?",
+            user_lower, flags=re.IGNORECASE
+        )
+        if recommend_match:
+            comp = recommend_match.group("comp") or "component"
+            use_case = (recommend_match.group("use") or "").strip()
+            gemini_prompt = (
+                f"User request: {user_input.strip()}\n\n"
+                "Instruction: In 3-4 short sentences and in an academic but casual tone, recommend a single BEST "
+                f"{comp} for the user's stated purpose{(' (' + use_case + ')') if use_case else ''}. "
+                "Also include one short alternative (1 sentence) and give an approximate PHP price range for each. "
+                "Keep the reply beginner-friendly, avoid asterisks or bullet points, and do not include internal routing text."
+            )
+            try:
+                gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+                gemini_resp = gemini_model.generate_content(gemini_prompt)
+                if gemini_resp and hasattr(gemini_resp, "text") and gemini_resp.text and gemini_resp.text.strip():
+                    return gemini_resp.text.strip()
+            except Exception:
+                logger.exception(
+                    "Gemini recommend call failed — using local fallback")
+            # local fallback
+            simple_fallback = f"Recommended {comp.title()} for {use_case or 'general use'}: choose a model that matches your CPU socket and desired features (M.2 support, VRM quality, form factor). "
+            simple_fallback += "Alternative: pick a well-reviewed midrange model from the same chipset. "
+            simple_fallback += "Approx price: ₱4,000–₱15,000 depending on features and brand."
+            return simple_fallback
+
+        # -------- LATEST / RECENT (hardware + components) ----------
+        if is_latest_hardware_q or is_latest_components_q:
+            explanation = "Short explainer: Latest hardware improves performance and efficiency; choose parts matched to your use (resolution, workload, budget)."
+            hw_lines = [
+                "2025 Latest GPUs:",
+                "• NVIDIA RTX 50-series (e.g., 5090/5080/5070/5060) — ₱25,000–₱180,000",
+                "• AMD RX 8000-series (e.g., 8900 XTX/8800 XT) — ₱20,000–₱150,000",
+                "2025 Latest CPUs:",
+                "• Intel Core Ultra 200-series — ₱12,000–₱45,000",
+                "• AMD Ryzen 8000-series — ₱10,000–₱40,000",
+            ]
+            comp_lines = [
+                "2025 Latest Components & Practical Recommendations:",
+                "• RAM: DDR5 32–64GB (6400–9600 MT/s) — ₱5,000–₱18,000 | Recommend: 32GB gaming, 64GB content creation",
+                "• NVMe Gen5: High-end Gen5 drives — ₱8,000–₱28,000 | Recommend: Gen5 for heavy I/O workloads",
+                "• NVMe Gen4: Solid Gen4 options — ₱3,500–₱10,000 | Recommend: Gen4 for value/perf",
+                "• CPU Coolers: AIO liquid & high-end air options — ₱3,000–₱12,000 | Recommend: AIO for sustained high clocks",
+                "• PSU: 650–1000W 80+ Gold (choose based on GPU/CPU) — ₱3,500–₱13,000 | Recommend: 20–30% headroom",
+                "• Cases/Fans: Mid-to-high airflow designs — ₱3,000–₱9,000 | Recommend: prioritize airflow for high-power GPUs",
+            ]
+            response = [explanation, ""]
+            if is_latest_hardware_q:
+                response.extend(hw_lines)
+                response.append("")
+            if is_latest_components_q or (is_time_keyword and not is_latest_hardware_q):
+                response.extend(comp_lines)
+            response.append("")
+            response.append(
+                "💡 Recommendation: Match GPU to your display (1080p→mid-range, 1440p/4K→high-end). Check local retailers for exact models & current PHP pricing.")
+            return "\n".join(response)
+
+       # --- Bottleneck flow ---
         if is_bottleneck_q:
             # Strict bottleneck prompt — forces compact, predictable format
             bottleneck_prompt = (
@@ -1653,181 +1616,71 @@ def gemini_fallback_with_data(user_input: str, context_data: dict, chat_history:
 
             return compact.strip()
 
-        # --- Compatibility / component matching mode ---
-        elif re.search(r"\bcompatible\b|\bworks with\b|\bfit\b|\bsupport\b", user_lower):
-            compat_prompt = (
-                base
-                + "\n\nCompatibility Task:\n"
-                f"- The user asked: {user_input}\n"
-                "- Using the context below, identify which components are compatible (e.g., CPU ↔ motherboard, RAM ↔ motherboard, cooler ↔ CPU, GPU ↔ motherboard, etc.).\n"
-                "- Output EXACTLY this compact format:\n"
-                "  ✅ Compatible (if compatible) or ❌ Not Compatible (if not)\n"
-                "  Reason: <1 short line mentioning socket, chipset, or interface>\n"
-                "  Suggested Matches:\n"
-                "    - <Model 1> — ₱<rounded range>\n"
-                "    - <Model 2> — ₱<rounded range>\n"
-                "    (limit to 4 suggestions max)\n"
-                "- Always use ₱ for peso prices and keep ranges short (₱4,000–₱6,000). Avoid disclaimers.\n"
-                "- Prefer components that appear in the provided context data when relevant.\n"
-                f"{price_instructions}\n"
-                "Context data:\n"
-                f"{context_snippet}\n"
+        # ---------- COMPATIBILITY ----------
+        if is_compat_q:
+            compat = get_compatible_components(user_input, context_data or {})
+            if compat and compat.get("found"):
+                chips = compat.get("chips", []) or []
+                reason = compat.get("reason", "Socket/chipset compatibility")
+                lines = [
+                    "✅ Compatible",
+                    f"Reason: {reason}",
+                    "💡 Recommendation: Choose from these compatible options:"
+                ]
+                for c in chips[:4]:
+                    name = c.get("text", "Unknown")
+                    price = c.get("price", "")
+                    lines.append(f"• {name}{(' — ' + price) if price else ''}")
+                lines.append("")
+                lines.append(
+                    "Check local retailers for exact models & pricing.")
+                return "\n".join(lines)
+            return (
+                "✅ Compatible\n"
+                "Reason: Socket and chipset appear to match based on query.\n"
+                "💡 Recommendation: Verify BIOS/firmware updates for older CPU support and check local retailers for exact model compatibility."
             )
 
-            try:
-                response = model.generate_content(compat_prompt)
-            except Exception:
-                logger.exception("Gemini compatibility call failed.")
-                return "✅ Compatible — based on context data. Check sockets and chipset before purchase."
+        # ---------- SPECS / BUILD QUERY ----------
+        if is_specs_build_q:
+            local = get_component_details(user_input)
+            if local and local.get("found"):
+                specs = local.get("specs", {}) or {}
+                specs_lines = [f"{k}: {v}" for k, v in specs.items()]
+                text_lines = [
+                    f"{local.get('name')} — {local.get('type', '').upper()}",
+                    f"Price: {local.get('price') or 'Check local retailers'}",
+                    ""
+                ]
+                if specs_lines:
+                    text_lines.append("Specs:")
+                    text_lines.extend(specs_lines)
+                text_lines.append("")
+                text_lines.append(
+                    "💡 Recommendation: Check local retailers for current pricing & stock.")
+                return "\n".join(text_lines)
 
-            raw = getattr(response, "text", None) or str(response)
-            clean = raw.strip()
+            return (
+                "Compact Build Info & Recommendation:\n"
+                "• CPU: Ryzen 5 5600 — ₱8,000–₱10,000\n"
+                "• GPU: RTX 3060 — ₱17,000–₱22,000\n"
+                "• RAM: DDR4 16GB 3200 MT/s — ₱3,000–₱4,000\n"
+                "• PSU: 650W 80+ Gold — ₱3,500–₱4,500\n"
+                " Recommendation: This combo balances gaming performance and price. Check local stores for exact models & current prices."
+            )
 
-            # cleanup markdown / greetings
-            clean = re.sub(
-                r'^(hi|hello|hey)[\s,\!\.]+', '', clean, flags=re.IGNORECASE)
-            clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean)
-            clean = re.sub(r'\*(.*?)\*', r'\1', clean)
-            clean = re.sub(r'(?m)^[\*\-\+]\s+', '• ', clean)
+        # ---------- GENERAL FALLBACK ----------
+        if is_general_q:
+            return (
+                "I wasn’t able to detect a specific PC-building topic. Try asking about components, compatibility, or pricing. "
+                " Example: 'What GPU works with Ryzen 5 5600X?' or 'Explain PCIe lanes.'"
+            )
 
-            # currency postprocess
-            clean = clean.replace("\\u20b1", "₱")
-            clean = re.sub(r"\$\s?([0-9][0-9,\.]*)", r"₱\1", clean)
-            clean = re.sub(r"\bUSD\b", "₱", clean, flags=re.IGNORECASE)
-            clean = re.sub(r"\bdollars?\b", "pesos",
-                           clean, flags=re.IGNORECASE)
+        return "Sorry — I couldn’t process that request."
 
-            return clean.strip()
-
-        # --- Non-bottleneck flow: general concise prompt (existing behavior) ---
-        is_latest_query = bool(re.search(
-            r"\b(latest|newest|what's new|what are the latest|recently released)\b",
-            user_lower,
-            flags=re.IGNORECASE,
-        ))
-        is_specs_query = any(k in user_lower for k in [
-                             "details", "specs", "specifications", "show me", "what are the specs", "how much", "price", "cost"])
-        is_build_query = any(k in user_lower for k in [
-                             "build", "recommend", "pc build", "₱", "php", "peso", "budget", "recommendation"])
-
-        if is_latest_query:
-            prompt = base + f"""
-
-User asked: {user_input}
-
-Task:
-- Provide direct lists of current mainstream desktop CPU and GPU families/series and 2–4 notable example models per vendor (Intel, AMD, NVIDIA) where applicable.
-- Include one short sentence summarizing the generation's key benefit.
-- If you mention pricing at all here, follow the pricing rules below.
-- KEEP RESPONSE CONCISE - MAX 8-10 LINES.
-
-Context (if relevant):
-{context_snippet}
-
-{price_instructions}
-"""
-        elif is_specs_query or is_build_query:
-            prompt = base + f"""
-
-User asked: {user_input}
-
-Task:
-- If user requested specs or price, return a short factual block or compact build summary.
-- If mentioning prices, follow the pricing rules below.
-- KEEP RESPONSE CONCISE.
-Context:
-{context_snippet}
-
-{price_instructions}
-"""
-        else:
-            prompt = base + f"""
-
-User asked: {user_input}
-
-Task:
-- Provide a concise (1–3 sentence) factual answer. Prefer the context if clearly relevant; otherwise answer from general knowledge without disclaimers about internal data.
-- If you provide price guidance for any component, follow the pricing rules below.
-Context:
-{context_snippet}
-
-{price_instructions}
-"""
-
-        # attach short chat history optionally
-        if chat_history:
-            try:
-                recent = chat_history[-6:]
-                hist_lines = ["\nChat history (most recent last):"]
-                for m in recent:
-                    hist_lines.append(
-                        f"{m.get('role', 'user').upper()}: {m.get('text') or m.get('message', '')}")
-                prompt += "\n" + "\n".join(hist_lines)
-            except Exception:
-                logger.exception("Failed to attach chat history.")
-
-        try:
-            response = model.generate_content(prompt)
-        except Exception:
-            logger.exception("Gemini call failed.")
-            return "Sorry — I'm unable to generate that right now."
-
-        raw = getattr(response, "text", None) or str(response)
-        clean = raw.strip()
-
-        # remove accidental greetings/forbidden phrases
-        clean = re.sub(r'^(hi|hello|hey)[\s,\!\.]+',
-                       '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r"\b(dataset|as of my last update|not in my database|not in my dataset|i don't have information|i do not have information)\b",
-                       "", clean, flags=re.IGNORECASE)
-
-        # --- Remove Markdown asterisks and convert list markers to clean bullets ---
-        try:
-            clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean, flags=re.DOTALL)
-            clean = re.sub(r'\*(.*?)\*', r'\1', clean, flags=re.DOTALL)
-            clean = re.sub(r'(?m)^[\*\-\+]\s+', '• ', clean)
-            clean = clean.replace('*', '')
-            clean = re.sub(r'(?m)^\s*•\s*•+\s*', '• ', clean)
-            clean = re.sub(r'\n{3,}', '\n\n', clean)
-        except Exception:
-            logger.exception(
-                "Markdown cleanup postprocessing failed; continuing.")
-
-        # --- Postprocessing for currency / unicode escapes ---
-        try:
-            if "\\u" in clean:
-                try:
-                    clean = clean.encode("utf-8").decode("unicode_escape")
-                except Exception:
-                    clean = clean.replace("\\u20b1", "₱")
-            clean = re.sub(r"\$\s?([0-9][0-9,\.]*)", r"₱\1", clean)
-            clean = re.sub(r"\bUSD\b", "₱", clean, flags=re.IGNORECASE)
-            clean = re.sub(r"\bdollars?\b", "pesos",
-                           clean, flags=re.IGNORECASE)
-
-            def expand_exact_to_range(match):
-                num = match.group(1)
-                digits = re.sub(r"[^\d]", "", num)
-                if not digits:
-                    return match.group(0)
-                v = int(digits)
-                lo = int(round(v * 0.85 / 100.0) * 100)
-                hi = int(round(v * 1.15 / 100.0) * 100)
-                return f"₱{lo:,d}–₱{hi:,d}"
-
-            clean = re.sub(
-                r"₱\s?([0-9]{3,7}(?:,[0-9]{3})?)\b(?!\s*[-–—])", expand_exact_to_range, clean)
-            clean = re.sub(r"\n{3,}", "\n\n", clean)
-        except Exception:
-            logger.exception(
-                "Postprocessing of Gemini text failed; returning raw cleaned text.")
-
-        clean = clean.strip()
-        return clean
     except Exception:
         logger.exception("Gemini fallback failed.")
         return "Sorry — I ran into an issue generating that info."
-
 
 # --------------------------
 # Unified Handler

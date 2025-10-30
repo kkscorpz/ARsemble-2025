@@ -13,20 +13,23 @@
         --chip-text: #3b1f1f;
         --muted: #6b7280;
       }
+
       * {
         box-sizing: border-box;
         margin: 0;
         padding: 0;
         font-family: "Inter", "Segoe UI", Roboto, Arial, sans-serif;
       }
+
       body {
-        background: #f1f3f4;
+        background: var(--bg);
         display: flex;
         justify-content: center;
         align-items: flex-start;
         min-height: 100vh;
-        padding: 16px;
+        padding: 2px;
       }
+
       .phone {
         background: var(--bg);
         width: 450px;
@@ -34,11 +37,11 @@
         height: 800px;
         max-height: 100vh;
         border-radius: 20px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
         display: flex;
         flex-direction: column;
         overflow: hidden;
       }
+
       .topbar {
         background: var(--teal);
         color: #fff;
@@ -48,10 +51,12 @@
         justify-content: space-between;
         align-items: center;
       }
+
       .topbar .icons {
         display: flex;
         gap: 10px;
       }
+
       .topbar button {
         background: transparent;
         border: none;
@@ -59,6 +64,7 @@
         cursor: pointer;
         font-size: 16px;
       }
+
       .content {
         flex: 1;
         overflow-y: auto;
@@ -68,6 +74,7 @@
         gap: 14px;
         scroll-behavior: smooth;
       }
+
       .bubble-assistant {
         align-self: flex-start;
         background: var(--bubble);
@@ -79,12 +86,14 @@
         line-height: 1.4;
         word-wrap: break-word;
       }
+
       .chip-row {
         display: flex;
         flex-wrap: wrap;
         gap: 10px;
         margin-top: 6px;
       }
+
       .chip {
         background: var(--chip);
         color: var(--chip-text);
@@ -94,18 +103,30 @@
         cursor: pointer;
         transition: background 0.2s, transform 0.2s;
       }
+
       .chip:hover {
         background: #ffc2b8;
         transform: scale(1.03);
       }
+
       .inputbar {
+        position: absolute;
+        bottom: env(safe-area-inset-bottom, 0);
+        left: 0;
+        right: 0;
         display: flex;
         align-items: center;
         gap: 10px;
         padding: 14px;
         border-top: 1px solid #eee;
         background: #fff;
+        z-index: 60;
       }
+
+      .phone {
+        padding-bottom: 84px;
+      }
+
       .pill {
         flex: 1;
         background: var(--chip);
@@ -117,14 +138,23 @@
         color: var(--chip-text);
         font-weight: 600;
       }
-      .pill input {
+
+      .pill textarea {
         flex: 1;
         border: none;
         background: transparent;
         outline: none;
         color: inherit;
         font-weight: 600;
+        resize: none;
+        overflow: hidden;
+        line-height: 1.2;
+        font-family: inherit;
+        font-size: inherit;
+        padding: 0;
+        min-height: 1.2em;
       }
+
       .send-btn {
         width: 44px;
         height: 44px;
@@ -137,6 +167,30 @@
         font-size: 20px;
         cursor: pointer;
       }
+
+      /* Slim, semi-transparent scrollbar styling */
+      .content::-webkit-scrollbar {
+        width: 6px;
+        /* thinner scrollbar */
+      }
+
+      .content::-webkit-scrollbar-thumb {
+        background: rgba(0, 0, 0, 0.2);
+        /* light gray, semi-transparent */
+        border-radius: 10px;
+        transition: background 0.3s ease;
+      }
+
+      .content::-webkit-scrollbar-thumb:hover {
+        background: rgba(0, 0, 0, 0.35);
+        /* darker on hover */
+      }
+
+      .content::-webkit-scrollbar-track {
+        background: transparent;
+        /* invisible track */
+      }
+
       .send-btn:hover {
         background: #026b77;
       }
@@ -145,27 +199,33 @@
         body {
           padding: 10px;
         }
+
         .phone {
           width: 100%;
           height: calc(100vh - 20px);
           max-height: none;
           border-radius: 0;
         }
+
         .content {
           padding: 14px;
         }
+
         .bubble-assistant {
           max-width: 100%;
           font-size: 15px;
         }
+
         .chip {
           font-size: 14px;
           padding: 8px 12px;
         }
+
         .pill {
           padding: 10px 12px;
           font-size: 14px;
         }
+
         .send-btn {
           width: 40px;
           height: 40px;
@@ -174,17 +234,20 @@
       }
     </style>
   </head>
+
   <body>
     <div class="phone">
-      <div class="topbar">
-        <div class="icons"></div>
-      </div>
-
       <div class="content" id="chat"></div>
 
       <div class="inputbar">
         <div class="pill">
-          ✦ <input id="query" placeholder="e.g. recommend ₱30000 build pc" />
+          ✦
+          <textarea
+            id="query"
+            placeholder="e.g. Intel Core i3 13100 compatible Motherboard"
+            aria-label="Ask ARIA"
+            rows="1"
+          ></textarea>
         </div>
         <div class="send-btn" id="send">▲</div>
       </div>
@@ -206,7 +269,75 @@
           return;
         }
 
-        // helper: safe scroll-to-bottom
+        // ------------------ keyboard/viewport helpers ------------------
+        // Keep the focused input visible when the on-screen keyboard opens
+
+        function ensureInputVisible(el) {
+          if (!el) return;
+          // modern browsers: use visualViewport when available
+          if (window.visualViewport) {
+            setTimeout(() => {
+              const rect = el.getBoundingClientRect();
+              const vv = window.visualViewport;
+              // how far the bottom of the input is below the viewport
+              const overlap = rect.bottom - vv.height;
+              if (overlap > -10) {
+                // scroll by the minimal amount to make it visible
+                window.scrollBy({
+                  top: overlap + 16,
+                  left: 0,
+                  behavior: "smooth",
+                });
+              }
+              try {
+                chat.scrollTop = chat.scrollHeight;
+              } catch (e) {}
+            }, 50);
+            return;
+          }
+
+          // fallback
+          setTimeout(() => {
+            try {
+              el.scrollIntoView({ behavior: "smooth", block: "center" });
+            } catch (e) {}
+            try {
+              chat.scrollTop = chat.scrollHeight;
+            } catch (e) {}
+          }, 50);
+        }
+
+        // Listen for focus on the textarea
+        qInput.addEventListener("focus", (e) => ensureInputVisible(e.target));
+
+        // Use visualViewport resize to detect keyboard open; fallback to window.resize
+        let lastVVHeight = window.visualViewport
+          ? window.visualViewport.height
+          : window.innerHeight;
+        function onViewportResize() {
+          const currentHeight = window.visualViewport
+            ? window.visualViewport.height
+            : window.innerHeight;
+          if (currentHeight < lastVVHeight) {
+            // keyboard probably opened
+            ensureInputVisible(qInput);
+            // optional: increase bottom padding so fixed input won't overlap content
+            const inset = Math.max(0, window.innerHeight - currentHeight);
+            document.querySelector(".phone").style.paddingBottom =
+              inset + 84 + "px";
+          } else {
+            // keyboard probably closed — restore base padding
+            document.querySelector(".phone").style.paddingBottom = "84px";
+          }
+          lastVVHeight = currentHeight;
+        }
+
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener("resize", onViewportResize);
+        } else {
+          window.addEventListener("resize", onViewportResize);
+        }
+
         function scrollChatToBottom() {
           try {
             chat.scrollTop = chat.scrollHeight;
@@ -790,12 +921,27 @@
           }
         }
 
-        // ⌨️ UI wiring
+        function autosizeTextarea(el) {
+          if (!el) return;
+          el.style.height = "auto";
+          el.style.height = el.scrollHeight + "px";
+        }
+
+        autosizeTextarea(qInput);
+
+        qInput.addEventListener("input", (e) => {
+          autosizeTextarea(e.target);
+        });
+
         sendBtn.addEventListener("click", ask);
+
         qInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            ask();
+          if (e.key === "Enter") {
+            if (!e.shiftKey) {
+              e.preventDefault();
+              ask();
+            } else {
+            }
           }
         });
 
@@ -803,14 +949,5 @@
         window.addEventListener("load", showStarterSuggestions);
       })();
     </script>
-    <div
-      id="output"
-      style="
-        white-space: pre-wrap;
-        font-family: monospace;
-        padding: 12px;
-        border: 1px solid #ddd;
-      "
-    ></div>
   </body>
 </html>
